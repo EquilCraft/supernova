@@ -53,7 +53,7 @@ public class ScalarSkyEngine extends SupernovaEngine {
 
     @Override
     protected boolean canUseChunk(final Chunk chunk) {
-        return ((SupernovaChunk) chunk).isLightUsable();
+        return ((SupernovaChunk) chunk).isSkyLightUsable();
     }
 
     @Override

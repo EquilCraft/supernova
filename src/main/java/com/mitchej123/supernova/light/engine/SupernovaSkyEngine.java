@@ -258,7 +258,7 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
 
     @Override
     protected boolean canUseChunk(final Chunk chunk) {
-        return ((SupernovaChunk) chunk).isLightUsable();
+        return ((SupernovaChunk) chunk).isSkyLightUsable();
     }
 
     /** Takes null sections out of the caches so the BFS stops at them; red decides, green and blue are brought into line with it. */

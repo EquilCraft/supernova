@@ -69,7 +69,7 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
 
     @Override
     protected boolean canUseChunk(final Chunk chunk) {
-        return ((SupernovaChunk) chunk).isLightUsable();
+        return ((SupernovaChunk) chunk).isBlockLightUsable();
     }
 
     @Override

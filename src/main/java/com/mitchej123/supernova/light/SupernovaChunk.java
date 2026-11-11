@@ -12,6 +12,16 @@ public interface SupernovaChunk extends ExtendedChunk {
     void setLightReady(boolean ready);
     void setLightUsable(boolean usable);
 
+    /**
+     * One lane has its nibbles in place although the chunk as a whole is not usable yet. That lane must work on the chunk from here on: a block change
+     * it skipped now would be lost, because its initial pass has already read the blocks.
+     */
+    void setLaneLightUsable(boolean sky, boolean usable);
+
+    boolean isSkyLightUsable();
+
+    boolean isBlockLightUsable();
+
     /** Light changed since the last successful save. Owned by Supernova because vanilla's isModified is read-then-cleared by the save loop. */
     void markLightDirty(boolean sky);
 

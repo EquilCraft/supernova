@@ -34,10 +34,18 @@ class InitialLightCoordinatorTest {
         final ConcurrentHashMap<Chunk, Boolean> ready = new ConcurrentHashMap<>();
         final AtomicInteger publishes = new AtomicInteger();
 
+        final ConcurrentHashMap<Chunk, Integer> usableLanes = new ConcurrentHashMap<>();
+
         @Override
         public void beginGeneration(Chunk chunk) {
             usable.put(chunk, false);
             ready.put(chunk, false);
+            usableLanes.put(chunk, 0);
+        }
+
+        @Override
+        public void markLaneUsable(Chunk chunk, int lane) {
+            usableLanes.merge(chunk, lane, (a, b) -> a | b);
         }
 
         @Override
@@ -102,8 +110,10 @@ class InitialLightCoordinatorTest {
         propagate(skyQueue, SKY);
         assertFalse(publisher.isReady(chunk), "one lane propagated is not enough");
         assertFalse(Boolean.TRUE.equals(publisher.usable.get(chunk)), "usable waits for every lane too");
+        assertEquals(SKY, publisher.usableLanes.get(chunk), "but the lane that finished must take block changes from now on");
 
         propagate(blockQueue, BLOCK);
+        assertEquals(SKY | BLOCK, publisher.usableLanes.get(chunk));
         assertTrue(publisher.usable.get(chunk), "both lanes propagated; neighbors may seed from it");
         assertFalse(publisher.isReady(chunk), "but seams are not reconciled yet");
 
@@ -113,6 +123,18 @@ class InitialLightCoordinatorTest {
         reconcileEdges(blockQueue, BLOCK);
         assertTrue(publisher.isReady(chunk));
         assertEquals(1, publisher.publishes.get());
+    }
+
+    @Test
+    void staleLaneCompletionDoesNotMakeTheNewGenerationUsable() {
+        final Chunk chunk = loadedChunk();
+        coordinator.queue(CX, CZ, chunk, null);
+        final ChunkTasks stale = skyQueue.removeFirstInitialLightTask();
+
+        coordinator.queue(CX, CZ, chunk, null);
+        coordinator.completePropagation(stale, SKY);
+
+        assertEquals(0, publisher.usableLanes.get(chunk), "the relight has not read the blocks yet; a superseded pass proves nothing about it");
     }
 
     @Test

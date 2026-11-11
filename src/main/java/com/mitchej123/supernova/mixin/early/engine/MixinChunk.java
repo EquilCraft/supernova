@@ -61,6 +61,8 @@ public abstract class MixinChunk implements SupernovaChunk {
     @Unique private volatile SWMRNibbleArray[] supernova$skyNibblesB;
     @Unique private volatile boolean supernova$lightReady;
     @Unique private volatile boolean supernova$lightUsable;
+    @Unique private volatile boolean supernova$skyLaneUsable;
+    @Unique private volatile boolean supernova$blockLaneUsable;
     @Unique private volatile boolean supernova$blockLightDirty;
     @Unique private volatile boolean supernova$skyLightDirty;
 
@@ -200,6 +202,15 @@ public abstract class MixinChunk implements SupernovaChunk {
 
     @Override
     public void setLightUsable(boolean usable) {this.supernova$lightUsable = usable;}
+
+    @Override
+    public void setLaneLightUsable(boolean sky, boolean usable) {if (sky) this.supernova$skyLaneUsable = usable; else this.supernova$blockLaneUsable = usable;}
+
+    @Override
+    public boolean isSkyLightUsable() {return this.supernova$lightReady || this.supernova$lightUsable || this.supernova$skyLaneUsable;}
+
+    @Override
+    public boolean isBlockLightUsable() {return this.supernova$lightReady || this.supernova$lightUsable || this.supernova$blockLaneUsable;}
 
     @Override
     public void markLightDirty(boolean sky) {if (sky) this.supernova$skyLightDirty = true; else this.supernova$blockLightDirty = true;}
@@ -370,6 +381,8 @@ public abstract class MixinChunk implements SupernovaChunk {
             if (!settled || iface.hasUnsettledLightValues(this.xPosition, this.zPosition)) {
                 this.supernova$lightReady = false;
                 this.supernova$lightUsable = false;
+                this.supernova$skyLaneUsable = false;
+                this.supernova$blockLaneUsable = false;
             }
         }
 

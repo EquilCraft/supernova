@@ -407,9 +407,17 @@ public final class WorldLightManager {
         @Override
         public void beginGeneration(final Chunk chunk) {
             // Client: stays usable, or MixinWorld's gate drops block changes until publish.
-            final boolean keepUsable = WorldLightManager.this.world.isRemote && ((SupernovaChunk) chunk).isLightUsable();
-            ((SupernovaChunk) chunk).setLightReady(false);
-            ((SupernovaChunk) chunk).setLightUsable(keepUsable);
+            final SupernovaChunk ext = (SupernovaChunk) chunk;
+            final boolean keepUsable = WorldLightManager.this.world.isRemote && ext.isLightUsable();
+            ext.setLightReady(false);
+            ext.setLightUsable(keepUsable);
+            ext.setLaneLightUsable(true, false);
+            ext.setLaneLightUsable(false, false);
+        }
+
+        @Override
+        public void markLaneUsable(final Chunk chunk, final int lane) {
+            ((SupernovaChunk) chunk).setLaneLightUsable(lane == InitialLightCoordinator.SKY, true);
         }
 
         @Override

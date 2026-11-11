@@ -74,9 +74,16 @@ final class InitialLightCoordinator {
         synchronized (this.lock) {
             generation = this.byChunk.get(task.chunkCoordinate);
             if (generation == null) return;
-            if (generation.completePropagation(task.lightGeneration, lane) != Generation.Result.PROPAGATION_DONE) return;
+            final Generation.Result result = generation.completePropagation(task.lightGeneration, lane);
+            if (result == Generation.Result.IGNORED) return;
 
-            if (this.loadedChunks.apply(task.chunkCoordinate) != generation.chunk) {
+            final boolean current = this.loadedChunks.apply(task.chunkCoordinate) == generation.chunk;
+            // This lane has read the chunk's blocks and will not read them again, so from here on it has to see every block change itself, however long
+            // the other lane still takes.
+            if (current) this.publisher.markLaneUsable(generation.chunk, lane);
+            if (result != Generation.Result.PROPAGATION_DONE) return;
+
+            if (!current) {
                 this.byChunk.remove(task.chunkCoordinate);
                 failed = generation;
             } else {
@@ -199,6 +206,9 @@ final class InitialLightCoordinator {
 
         /** A new generation has started: the chunk is neither usable nor ready until it finishes. */
         void beginGeneration(Chunk chunk);
+
+        /** One lane ({@link #SKY} or {@link #BLOCK}) finished propagating; that lane alone may use the chunk from now on. */
+        void markLaneUsable(Chunk chunk, int lane);
 
         /** Propagation is done on every lane; neighbors may now seed from this chunk. */
         void markUsable(Chunk chunk);

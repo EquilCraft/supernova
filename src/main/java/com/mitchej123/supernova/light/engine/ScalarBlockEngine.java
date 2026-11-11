@@ -58,7 +58,7 @@ public class ScalarBlockEngine extends SupernovaEngine {
 
     @Override
     protected boolean canUseChunk(final Chunk chunk) {
-        return ((SupernovaChunk) chunk).isLightUsable();
+        return ((SupernovaChunk) chunk).isBlockLightUsable();
     }
 
     @Override
