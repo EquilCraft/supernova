@@ -29,6 +29,7 @@ public final class MCBootstrap {
         public static final int INDEX_PROBE = 200;
         public static final int TILE_LAMP = 201;
         public static final int GREEN_EDGE_LAMP = 203;
+        public static final int DIM_RED_LAMP = 241;
         public static final int REMAP_LAMP = 300, REMAP_LAMP_TARGET = 555;
         public static final int REMAP_GLASS = 310, REMAP_GLASS_TARGET = 600;
         public static final int REMAP_SIDED = 320, REMAP_SIDED_TARGET = 610;

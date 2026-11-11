@@ -23,6 +23,9 @@ import net.minecraft.world.chunk.storage.ExtendedBlockStorage;
 
 public class SupernovaBlockEngine extends SupernovaRGBEngine {
 
+    /** The most a neighbour can hand over on any channel. */
+    private static final int NEAR_FULL = PackedColorLight.pack(14, 14, 14);
+
     private final IBlockAccess safeBlockAccess;
     private final DynamicEmissionSnapshots dynamicEmission;
 
@@ -149,9 +152,13 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
         final int meta = this.getBlockMeta(worldX, worldY, worldZ);
         final int emittedRGB = emissionAt(block, this.lastBlockId, meta, worldX, worldY, worldZ);
 
-        final int calculatedRGB = this.calculateLightValueWithBlock(worldX, worldY, worldZ, PackedColorLight.ALL_CHANNELS, block, meta);
-        if (currentRGB == calculatedRGB) {
-            return;
+        // An unchanged level only proves this cell is right. A block that gates faces can leave the level alone and still cut a neighbour off, and one
+        // that replaced such a block can leave it alone and still owe a neighbour light.
+        if (sf == 0L) {
+            final int calculatedRGB = this.calculateLightValueWithBlock(worldX, worldY, worldZ, PackedColorLight.ALL_CHANNELS, block, meta);
+            if (currentRGB == calculatedRGB && this.neighboursHoldLightFrom(worldX, worldY, worldZ, currentRGB)) {
+                return;
+            }
         }
 
         this.setLightLevel(worldX, worldY, worldZ, emittedRGB);
@@ -163,10 +170,44 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
                     | sf);
         }
 
+        // No sided flag: the old light may have left through a face the new block closes, and that is exactly where the decrease has to go.
         this.appendToDecreaseQueue(encodeCoords(worldX, worldZ, worldY, encodeOffset)
                 | PackedColorLightQueue.encodeQueuePackedRGB(currentRGB)
-                | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT)
-                | sf);
+                | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT));
+    }
+
+    /** True when every neighbour already carries at least what this cell would hand it; the cell is known not to gate faces. */
+    private boolean neighboursHoldLightFrom(final int worldX, final int worldY, final int worldZ, final int level) {
+        if (PackedColorLight.maxComponent(level) <= 1) {
+            return true;
+        }
+        final int sectionOffset = this.chunkSectionIndexOffset;
+        for (final AxisDirection direction : AXIS_DIRECTIONS) {
+            final int offX = worldX + direction.x;
+            final int offY = worldY + direction.y;
+            final int offZ = worldZ + direction.z;
+
+            final int sectionIndex = (offX >> 4) + 5 * (offZ >> 4) + (5 * 5) * (offY >> 4) + sectionOffset;
+            if (this.nibbleCacheR[sectionIndex] == null) {
+                continue;
+            }
+            final int localIndex = (offX & 15) | ((offZ & 15) << 4) | ((offY & 15) << 8);
+
+            final Block dest = this.getBlockFast(sectionIndex, offX & 15, offY & 15, offZ & 15);
+            final int absorption;
+            if (dest == Blocks.air) {
+                absorption = MIN_ABSORPTION;
+            } else {
+                final int destId = this.lastBlockId;
+                final ExtendedBlockStorage section = this.sectionCache[sectionIndex];
+                final int destMeta = section != null ? section.getExtBlockMetadata(offX & 15, offY & 15, offZ & 15) : 0;
+                absorption = FaceOcclusion.resolveAbsorption(this.safeBlockAccess, destId, dest, destMeta, direction.oppositeOrdinal, offX, offY, offZ);
+            }
+            if (PackedColorLight.anyComponentGreater(PackedColorLight.packedSubRGB(level, absorption), this.getLightLevel(sectionIndex, localIndex))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -179,7 +220,9 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
     private int calculateLightValueWithBlock(final int worldX, final int worldY, final int worldZ, final int expect, final Block block, final int meta) {
         int level = emissionAt(block, this.lastBlockId, meta, worldX, worldY, worldZ);
 
-        if (PackedColorLight.maxComponent(level) >= 14 || PackedColorLight.anyComponentGreater(level, expect)) {
+        // No neighbour can add to a channel that already emits 14, but one bright channel says nothing about the other two: a red lamp standing in
+        // blue light is brighter than its own emission.
+        if (!PackedColorLight.anyComponentGreater(NEAR_FULL, level) || PackedColorLight.anyComponentGreater(level, expect)) {
             return level;
         }
 
@@ -491,9 +534,12 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
                         }
                         queue = this.resizeIncreaseQueue();
                     }
+                    // A cell that kept a channel of its own may out-shine this source on it, so it has to propagate back too. A recheck entry would
+                    // have done that, but it is skipped once the level it was queued with has changed.
+                    final long directions = newRGB == targetRGB ? propagate.everythingButTheOppositeDirection : ALL_DIRECTIONS_BITSET;
                     queue[queueLength++] = encodeCoords(offX, offZ, offY, encodeOffset)
                             | PackedColorLightQueue.encodeQueuePackedRGB(newRGB)
-                            | (propagate.everythingButTheOppositeDirection << RGB_DIR_SHIFT)
+                            | (directions << RGB_DIR_SHIFT)
                             | sidedFlag(destId);
                 }
             }
@@ -581,11 +627,6 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
 
                 final int keptRGB = currentRGB & keptMask;
 
-                // Decrease clears down to the kept channels; emission is re-applied in the increase phase.
-                if (this.setLightLevelInCache(sectionIndex, localIndex, keptRGB)) {
-                    this.postLightUpdate(sectionIndex, localIndex);
-                }
-
                 // Field read avoids World.getBlock() for the non-emitting bulk.
                 final int emittedRGB;
                 if (block.getLightValue() <= 0 && !(block instanceof ColoredLightSource)
@@ -596,8 +637,16 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
                 }
                 final int newRGB = PackedColorLight.packedMax(keptRGB, emittedRGB);
 
+                // Cleared down to the kept channels plus the cell's own emission, at once. A later wave reaching this cell in the same pass must see
+                // that value, not a deferred one: whatever it takes away from the kept channels has to stay gone, and the emission it may clear is put
+                // back by its own visit.
+                if (this.setLightLevelInCache(sectionIndex, localIndex, newRGB)) {
+                    this.postLightUpdate(sectionIndex, localIndex);
+                }
+
                 if (newRGB != 0) {
-                    final long flags = (newRGB != keptRGB) ? FLAG_WRITE_LEVEL : FLAG_RECHECK_LEVEL;
+                    // Recheck: a later visit that lowers the cell again queues its own entry, and this one must not propagate what it took away.
+                    final long flags = FLAG_RECHECK_LEVEL;
                     if (increaseQueueLength >= increaseQueue.length) {
                         if (increaseQueue.length >= MAX_QUEUE_SIZE) {
                             this.queueOverflowed = true;
@@ -610,9 +659,9 @@ public class SupernovaBlockEngine extends SupernovaRGBEngine {
                                     << RGB_DIR_SHIFT) | flags | sFlag;
                 }
 
-                // channelPresenceMask stops re-propagating channels a prior visit from another direction already zeroed.
-                final int clearedMask = ~keptMask & PackedColorLight.ALL_CHANNELS;
-                final int decreaseRGB = targetRGB & clearedMask & PackedColorLight.channelPresenceMask(currentRGB);
+                // Only what the cell actually lost travels on. A cleared channel its own emission or beam still covers handed its neighbours nothing
+                // that depended on the wave's source, and re-sending it from every such cell would bounce the wave between them without end.
+                final int decreaseRGB = targetRGB & PackedColorLightQueue.channelMaskWhereGt(currentRGB, newRGB);
                 if (PackedColorLight.anyNonZero(decreaseRGB)) {
                     if (queueLength >= queue.length) {
                         if (queue.length >= MAX_QUEUE_SIZE) {

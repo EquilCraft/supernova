@@ -61,6 +61,34 @@ class BlockEngineBFSTest {
         return BFSTestHelper.centeredNeighborhood(new TestableBlockEngine(MCBootstrap.getServerWorld()));
     }
 
+    public static class DimRedLamp extends Block implements ColoredLightSource {
+        public DimRedLamp() {super(Material.rock);}
+
+        @Override
+        public int getColoredLightEmission(final int meta) {return pack(3, 0, 0);}
+    }
+
+    /**
+     * Two decrease waves reach the same source cell in one pass, and each clears different channels. Whatever the first visit kept is only provisional:
+     * the second may take it away, and the source must end up with its own emission and nothing more.
+     */
+    @Test
+    void sourceVisitedByTwoDecreasesKeepsOnlyWhatSurvivesBoth() {
+        final TestableBlockEngine engine = neighborhoodEngine();
+        final Block lamp = MCBootstrap.registerTestBlock(TestIds.DIM_RED_LAMP, "dim_red_lamp", DimRedLamp.class, 0, false, 0);
+        BFSTestHelper.setBlock(engine, 8, 68, 8, lamp);
+        BFSTestHelper.setLight(engine, 8, 68, 8, 10, 10, 0);
+
+        // Red is taken away from the west, green from the east; nothing else lights the area.
+        BFSTestHelper.enqueueDecrease(engine, 7, 68, 8, 11, 0, 0);
+        BFSTestHelper.enqueueDecrease(engine, 9, 68, 8, 0, 11, 0);
+        engine.callPerformLightDecrease();
+
+        assertLight(engine, 8, 68, 8, 3, 0, 0);
+        assertLight(engine, 8, 69, 8, 2, 0, 0);
+        assertLight(engine, 8, 66, 8, 1, 0, 0);
+    }
+
     @Test
     void sectionPackingKeepsGreenAndBlueWhenRedHasNoStorage() {
         final TestableBlockEngine engine = neighborhoodEngine();

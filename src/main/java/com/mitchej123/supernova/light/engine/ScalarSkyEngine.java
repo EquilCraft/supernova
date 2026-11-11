@@ -539,7 +539,7 @@ public class ScalarSkyEngine extends SupernovaEngine {
             final int posX = ((int) queueValue & 63) + decodeOffsetX;
             final int posZ = (((int) queueValue >>> 6) & 63) + decodeOffsetZ;
             final int posY = (((int) queueValue >>> 12) & COORD_Y_MASK) + decodeOffsetY;
-            final int propagatedLevel = (int) ((queueValue >>> LIGHT_LEVEL_SHIFT) & 0xF);
+            int propagatedLevel = (int) ((queueValue >>> LIGHT_LEVEL_SHIFT) & 0xF);
             final AxisDirection[] checkDirections = OLD_CHECK_DIRECTIONS[(int) ((queueValue >>> DIRECTION_SHIFT) & 63L)];
 
             final boolean checkSourceFaces = this.resolveSourceFaces(queueValue, posX, posY, posZ, sectionOffset);
@@ -549,6 +549,8 @@ public class ScalarSkyEngine extends SupernovaEngine {
                     continue;
                 }
             } else if ((queueValue & FLAG_WRITE_LEVEL) != 0L) {
+                // Merge, never overwrite: an entry ahead of this one may already have lit the cell brighter than the level queued for it.
+                propagatedLevel = Math.max(propagatedLevel, this.getLightLevel(posX, posY, posZ));
                 this.setLightLevel(posX, posY, posZ, propagatedLevel);
             }
 
@@ -697,8 +699,9 @@ public class ScalarSkyEngine extends SupernovaEngine {
 
                 if (this.setLightLevelInCache(sectionIndex, localIndex, 0)) this.postLightUpdate(sectionIndex, localIndex);
 
-                // Sky light has no per-block emission to re-apply.
-                if (currentLevel > 1) {
+                // Sky light has no per-block emission to re-apply. Carried on even at level 1: a neighbour lit from elsewhere only re-lights this cell
+                // once the decrease reaches it and queues it for a recheck.
+                {
                     if (queueLength >= queue.length) {
                         if (queue.length >= MAX_QUEUE_SIZE) {
                             this.queueOverflowed = true;

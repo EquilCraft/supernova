@@ -177,11 +177,8 @@ class BlockEngineHueInvariantTest {
         BFSTestHelper.enqueueIncrease(engine, SRC_X + 10, SRC_Y, SRC_Z, 0, 15, 0);
         engine.callPerformLightIncrease();
 
+        // The green source cell is no exception: its neighbours hand the first source's red back to it.
         scanField((x, y, z, d, light) -> {
-            if (x == SRC_X + 10 && y == SRC_Y && z == SRC_Z) {
-                assertEquals(pack(0, 15, 0), light & 0x0F0F0F, "green source cell is written wholesale, never back-filled by BFS");
-                return;
-            }
             final int dGreen = Math.abs(x - (SRC_X + 10)) + Math.abs(y - SRC_Y) + Math.abs(z - SRC_Z);
             assertEquals(Math.max(ORDERED_R - d, 0), red(light), "R at (" + x + "," + y + "," + z + ")");
             assertEquals(Math.max(Math.max(ORDERED_G - d, 0), Math.max(15 - dGreen, 0)), green(light), "G at (" + x + "," + y + "," + z + ")");

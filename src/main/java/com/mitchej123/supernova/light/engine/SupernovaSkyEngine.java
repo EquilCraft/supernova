@@ -997,9 +997,12 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
                         }
                         queue = this.resizeIncreaseQueue();
                     }
+                    // A cell that kept a channel of its own may out-shine this source on it, so it has to propagate back too. A recheck entry would
+                    // have done that, but it is skipped once the level it was queued with has changed.
+                    final long directions = newRGB == targetRGB ? propagate.everythingButTheOppositeDirection : ALL_DIRECTIONS_BITSET;
                     queue[queueLength++] = encodeCoords(offX, offZ, offY, encodeOffset)
                             | PackedColorLightQueue.encodeQueuePackedRGB(newRGB)
-                            | (propagate.everythingButTheOppositeDirection << RGB_DIR_SHIFT)
+                            | (directions << RGB_DIR_SHIFT)
                             | sidedFlag(destId);
                 }
             }

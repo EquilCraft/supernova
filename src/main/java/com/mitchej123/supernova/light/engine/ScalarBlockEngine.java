@@ -95,9 +95,13 @@ public class ScalarBlockEngine extends SupernovaEngine {
         final long sf = sidedFlag(this.lastBlockId);
         final int emission = emissionAt(block, this.lastBlockId, worldX, worldY, worldZ);
 
-        final int calculatedLevel = this.calculateLightValueWithBlock(worldX, worldY, worldZ, 15, block);
-        if (currentLevel == calculatedLevel) {
-            return;
+        // An unchanged level only proves this cell is right. A block that gates faces can leave the level alone and still cut a neighbour off, and one
+        // that replaced such a block can leave it alone and still owe a neighbour light.
+        if (sf == 0L) {
+            final int calculatedLevel = this.calculateLightValueWithBlock(worldX, worldY, worldZ, 15, block);
+            if (currentLevel == calculatedLevel && this.neighboursHoldLightFrom(worldX, worldY, worldZ, currentLevel)) {
+                return;
+            }
         }
 
         this.setLightLevel(worldX, worldY, worldZ, emission);
@@ -109,10 +113,44 @@ public class ScalarBlockEngine extends SupernovaEngine {
                     | sf);
         }
 
+        // No sided flag: the old light may have left through a face the new block closes, and that is exactly where the decrease has to go.
         this.appendToDecreaseQueue(encodeCoords(worldX, worldZ, worldY, encodeOffset)
                 | this.encodeQueueLevel(currentLevel)
-                | (((long) ALL_DIRECTIONS_BITSET) << DIRECTION_SHIFT)
-                | sf);
+                | (((long) ALL_DIRECTIONS_BITSET) << DIRECTION_SHIFT));
+    }
+
+    /** True when every neighbour already carries at least what this cell would hand it; the cell is known not to gate faces. */
+    private boolean neighboursHoldLightFrom(final int worldX, final int worldY, final int worldZ, final int level) {
+        if (level <= 1) {
+            return true;
+        }
+        final int sectionOffset = this.chunkSectionIndexOffset;
+        for (final AxisDirection direction : AXIS_DIRECTIONS) {
+            final int offX = worldX + direction.x;
+            final int offY = worldY + direction.y;
+            final int offZ = worldZ + direction.z;
+
+            final int sectionIndex = (offX >> 4) + 5 * (offZ >> 4) + (5 * 5) * (offY >> 4) + sectionOffset;
+            if (this.nibbleCache[sectionIndex] == null) {
+                continue;
+            }
+            final int localIndex = (offX & 15) | ((offZ & 15) << 4) | ((offY & 15) << 8);
+
+            final Block dest = this.getBlockFast(sectionIndex, offX & 15, offY & 15, offZ & 15);
+            final int absorption;
+            if (dest == Blocks.air) {
+                absorption = 1;
+            } else {
+                final int destId = this.lastBlockId;
+                final ExtendedBlockStorage section = this.sectionCache[sectionIndex];
+                final int destMeta = section != null ? section.getExtBlockMetadata(offX & 15, offY & 15, offZ & 15) : 0;
+                absorption = FaceOcclusion.resolveScalarAbsorption(destId, dest, destMeta, direction.oppositeOrdinal, offX, offY, offZ);
+            }
+            if (level - absorption > this.getLightLevel(sectionIndex, localIndex)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -254,7 +292,7 @@ public class ScalarBlockEngine extends SupernovaEngine {
             final int posX = ((int) queueValue & 63) + decodeOffsetX;
             final int posZ = (((int) queueValue >>> 6) & 63) + decodeOffsetZ;
             final int posY = (((int) queueValue >>> 12) & COORD_Y_MASK) + decodeOffsetY;
-            final int propagatedLevel = (int) ((queueValue >>> LIGHT_LEVEL_SHIFT) & 0xF);
+            int propagatedLevel = (int) ((queueValue >>> LIGHT_LEVEL_SHIFT) & 0xF);
             final AxisDirection[] checkDirections = OLD_CHECK_DIRECTIONS[(int) ((queueValue >>> DIRECTION_SHIFT) & 63L)];
 
             final boolean checkSourceFaces = this.resolveSourceFaces(queueValue, posX, posY, posZ, sectionOffset);
@@ -264,6 +302,8 @@ public class ScalarBlockEngine extends SupernovaEngine {
                     continue;
                 }
             } else if ((queueValue & FLAG_WRITE_LEVEL) != 0L) {
+                // Merge, never overwrite: an entry ahead of this one may already have lit the cell brighter than the level queued for it.
+                propagatedLevel = Math.max(propagatedLevel, this.getLightLevel(posX, posY, posZ));
                 this.setLightLevel(posX, posY, posZ, propagatedLevel);
             }
 
@@ -411,7 +451,11 @@ public class ScalarBlockEngine extends SupernovaEngine {
                             | (((long) ALL_DIRECTIONS_BITSET) << DIRECTION_SHIFT)
                             | FLAG_WRITE_LEVEL
                             | sFlag;
-                } else if (currentLevel > 1) {
+                }
+
+                // Always carried on, even from a source and even at level 1: light that passed through this cell is still out there, and a neighbour
+                // lit from elsewhere only re-lights this cell once the decrease reaches it and queues it for a recheck.
+                {
                     if (queueLength >= queue.length) {
                         if (queue.length >= MAX_QUEUE_SIZE) {
                             this.queueOverflowed = true;
