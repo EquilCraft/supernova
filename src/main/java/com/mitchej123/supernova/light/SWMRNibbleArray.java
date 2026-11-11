@@ -183,6 +183,20 @@ public final class SWMRNibbleArray {
         this.zeroFlag = other.zeroFlag;
     }
 
+    /** Whole-array counterpart of {@link #extrudeLower}: this nibble ends up reading exactly like {@code other}. */
+    public void copyFrom(final SWMRNibbleArray other) {
+        if (other.stateUpdating == INIT_STATE_NULL) {
+            throw new IllegalArgumentException();
+        }
+        if (other.storageUpdating == null) {
+            this.setUninitialised();
+            return;
+        }
+        System.arraycopy(other.storageUpdating, 0, this.prepareForBulkWrite(), 0, ARRAY_SIZE);
+        this.fullFlag = other.fullFlag;
+        this.zeroFlag = other.zeroFlag;
+    }
+
     public void setFull() {
         if (this.stateUpdating != INIT_STATE_HIDDEN) {
             this.stateUpdating = INIT_STATE_INIT;

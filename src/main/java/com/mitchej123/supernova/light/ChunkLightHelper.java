@@ -229,18 +229,35 @@ public final class ChunkLightHelper {
             return 0;
         }
 
-        if (skyR == null) {
-            return 15;
-        }
-
-        final int idx = sectionY - minLightSection;
-        final int r = readSkyChannel(skyR, idx, x, y, z, 15);
-        final int g = readSkyChannel(skyG, idx, x, y, z, r);
-        final int b = readSkyChannel(skyB, idx, x, y, z, r);
-        return Math.max(r, Math.max(g, b));
+        final int packed = readSkyRGB(skyR, skyG, skyB, sectionY - minLightSection, x, y, z);
+        return Math.max((packed >> 16) & 15, Math.max((packed >> 8) & 15, packed & 15));
     }
 
-    /** An absent channel is not darkness: R carries the section state, so absent R means above-world (15) and absent G/B mirror R. */
+    /**
+     * Index of the section whose nibble answers for {@code idx}: itself when initialised, else the nearest initialised section above, else -1 for open sky.
+     * A null sky section holds no blocks and has none next to it, so its light is the bottom layer of whatever is above, repeated all the way down.
+     */
+    public static int skySourceSection(final SWMRNibbleArray[] skyR, final int idx) {
+        if (skyR == null || idx < 0) return -1;
+        for (int i = idx; i < skyR.length; ++i) {
+            if (!nibbleAbsent(skyR[i])) return i;
+        }
+        return -1;
+    }
+
+    /** Packed {@code 0x0R0G0B} sky light at a position, following null sections up to the section they inherit from. */
+    public static int readSkyRGB(final SWMRNibbleArray[] skyR, final SWMRNibbleArray[] skyG, final SWMRNibbleArray[] skyB, final int idx, final int x,
+        final int y, final int z) {
+        final int src = skySourceSection(skyR, idx);
+        if (src < 0) return 0x0F0F0F;
+        final int localY = src == idx ? y : 0;
+        final int r = skyR[src].getVisible(x, localY, z);
+        final int g = readSkyChannel(skyG, src, x, localY, z, r);
+        final int b = readSkyChannel(skyB, src, x, localY, z, r);
+        return (r << 16) | (g << 8) | b;
+    }
+
+    /** One channel of one section, no inheritance from above: an absent green or blue nibble mirrors red, so the caller passes red as {@code absent}. */
     public static int readSkyChannel(SWMRNibbleArray[] nibbles, int idx, int x, int y, int z, int absent) {
         if (nibbles == null || idx < 0 || idx >= nibbles.length) return absent;
         final SWMRNibbleArray nib = nibbles[idx];

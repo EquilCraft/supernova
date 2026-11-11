@@ -26,16 +26,18 @@ public class SupernovaBlockLightProvider implements BlockLightProvider {
         final SWMRNibbleArray g = getChannel(ext.getBlockNibblesG(), idx);
         final SWMRNibbleArray b = getChannel(ext.getBlockNibblesB(), idx);
 
-        final SWMRNibbleArray skyR = getChannel(ext.getSkyNibblesR(), idx);
-        final SWMRNibbleArray skyG = getChannel(ext.getSkyNibblesG(), idx);
-        final SWMRNibbleArray skyB = getChannel(ext.getSkyNibblesB(), idx);
+        // A null sky section inherits the bottom layer of the nearest initialised section above it; with none above it is open sky.
+        final int skySrc = ChunkLightHelper.skySourceSection(ext.getSkyNibblesR(), idx);
+        final SWMRNibbleArray skyR = getChannel(ext.getSkyNibblesR(), skySrc);
+        final SWMRNibbleArray skyG = getChannel(ext.getSkyNibblesG(), skySrc);
+        final SWMRNibbleArray skyB = getChannel(ext.getSkyNibblesB(), skySrc);
 
         final boolean hasSky = chunk.worldObj != null && !chunk.worldObj.provider.hasNoSky;
         if (r == null && g == null && b == null && skyR == null && skyG == null && skyB == null) {
             // An absent sky nibble is full daylight, not "no data": sections above the terrain carry no ExtendedBlockStorage and are never sent.
             return hasSky ? SupernovaSectionLightData.ZERO_BLOCK_FULL_SKY : null;
         }
-        return new SupernovaSectionLightData(r, g, b, skyR, skyG, skyB, hasSky);
+        return new SupernovaSectionLightData(r, g, b, skyR, skyG, skyB, hasSky, skySrc != idx);
     }
 
     @Override
@@ -72,11 +74,9 @@ public class SupernovaBlockLightProvider implements BlockLightProvider {
         final int idx = sectionIndex(y);
         if (idx < 0) return -1;
 
-        final int r = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesR(), idx, x, y, z, 15);
-        final int g = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesG(), idx, x, y, z, r);
-        final int b = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesB(), idx, x, y, z, r);
+        final int sky = ChunkLightHelper.readSkyRGB(ext.getSkyNibblesR(), ext.getSkyNibblesG(), ext.getSkyNibblesB(), idx, x, y, z);
 
-        return (r << 8) | (g << 4) | b;
+        return (((sky >> 16) & 15) << 8) | (((sky >> 8) & 15) << 4) | (sky & 15);
     }
 
     private static SupernovaChunk resolveChunk(IBlockAccess blockAccess, int x, int z) {

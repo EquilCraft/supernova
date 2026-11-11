@@ -236,9 +236,10 @@ public final class ColoredLightHelper {
         final int r = readNibble(ext.getBlockNibblesR(), idx, x, y, z);
         final int g = readNibble(ext.getBlockNibblesG(), idx, x, y, z);
         final int b = readNibble(ext.getBlockNibblesB(), idx, x, y, z);
-        final int skyR = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesR(), idx, x, y, z, 15);
-        final int skyG = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesG(), idx, x, y, z, skyR);
-        final int skyB = ChunkLightHelper.readSkyChannel(ext.getSkyNibblesB(), idx, x, y, z, skyR);
+        final int sky = ChunkLightHelper.readSkyRGB(ext.getSkyNibblesR(), ext.getSkyNibblesG(), ext.getSkyNibblesB(), idx, x, y, z);
+        final int skyR = (sky >> 16) & 15;
+        final int skyG = (sky >> 8) & 15;
+        final int skyB = sky & 15;
 
         return r | (g << 4) | (b << 8) | (skyR << 12) | (skyG << 16) | (skyB << 20);
     }

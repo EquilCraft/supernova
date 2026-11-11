@@ -30,6 +30,14 @@ public class SupernovaSectionLightData implements SectionLightData {
 
     public SupernovaSectionLightData(SWMRNibbleArray r, SWMRNibbleArray g, SWMRNibbleArray b, SWMRNibbleArray skyR, SWMRNibbleArray skyG,
         SWMRNibbleArray skyB, boolean hasSky) {
+        this(r, g, b, skyR, skyG, skyB, hasSky, false);
+    }
+
+    /**
+     * @param skyFromAbove the sky nibbles belong to a section above this one, which is null and inherits their bottom layer at every height
+     */
+    public SupernovaSectionLightData(SWMRNibbleArray r, SWMRNibbleArray g, SWMRNibbleArray b, SWMRNibbleArray skyR, SWMRNibbleArray skyG,
+        SWMRNibbleArray skyB, boolean hasSky, boolean skyFromAbove) {
         final byte[][] scratch = SCRATCH.get();
         final byte[] rSrc = stateSource(snapshot(r, scratch[0]), scratch[0]);
         final byte[] gSrc = stateSource(snapshot(g, scratch[1]), scratch[1]);
@@ -42,6 +50,13 @@ public class SupernovaSectionLightData implements SectionLightData {
         final byte[] sgSrc = sgState == SWMRNibbleArray.VISIBLE_ABSENT ? srSrc : stateSource(sgState, scratch[4]);
         final int sbState = snapshot(skyB, scratch[5]);
         final byte[] sbSrc = sbState == SWMRNibbleArray.VISIBLE_ABSENT ? srSrc : stateSource(sbState, scratch[5]);
+
+        if (skyFromAbove) {
+            // Only the scratch copies hold real data; the shared uniform arrays are the same at every height already.
+            repeatBottomLayer(srSrc, scratch[3]);
+            repeatBottomLayer(sgSrc, scratch[4]);
+            repeatBottomLayer(sbSrc, scratch[5]);
+        }
 
         if (rSrc == ZERO_BYTES && gSrc == ZERO_BYTES && bSrc == ZERO_BYTES && srSrc == FULL_BYTES && sgSrc == FULL_BYTES && sbSrc == FULL_BYTES) {
             this.fusedCache = null;
@@ -56,6 +71,15 @@ public class SupernovaSectionLightData implements SectionLightData {
             cache[idx + 1] = ((rb & 0xF0) << 20) | ((gb & 0xF0) << 16) | ((bb & 0xF0) << 12) | ((srb & 0xF0) << 4) | (sgb & 0xF0) | ((sbb & 0xF0) >>> 4);
         }
         this.fusedCache = cache;
+    }
+
+    /** Index is {@code x | z << 4 | y << 8} at two cells a byte, so one layer is the first 128 bytes. */
+    private static void repeatBottomLayer(final byte[] src, final byte[] scratch) {
+        if (src != scratch) return;
+        final int layer = SIZE >> 4;
+        for (int y = 1; y < 16; ++y) {
+            System.arraycopy(scratch, 0, scratch, y * layer, layer);
+        }
     }
 
     private static int snapshot(final SWMRNibbleArray nib, final byte[] dst) {

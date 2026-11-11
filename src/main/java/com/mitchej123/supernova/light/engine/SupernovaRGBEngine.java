@@ -212,31 +212,36 @@ public abstract class SupernovaRGBEngine extends SupernovaEngine {
 
     protected void unpackDirtySections() {
         for (int idx = 0; idx < this.packedRGBCache.length; ++idx) {
-            if (!this.packedCacheDirty[idx]) continue;
-            final int[] packed = this.packedRGBCache[idx];
-            if (packed == null) continue;
-
-            final SWMRNibbleArray nibR = this.nibbleCacheR[idx];
-            final SWMRNibbleArray nibG = this.nibbleCacheG[idx];
-            final SWMRNibbleArray nibB = this.nibbleCacheB[idx];
-            if (nibR == null) continue;
-
-            final int or = this.packedOr[idx];
-            final int and = this.packedAnd[idx];
-
-            if (and == WHITE && or == WHITE) {
-                nibR.setFull();
-                if (nibG != null) nibG.setFull();
-                if (nibB != null) nibB.setFull();
-            } else if (or == 0) {
-                nibR.setZero();
-                if (nibG != null) nibG.setZero();
-                if (nibB != null) nibB.setZero();
-            } else {
-                unpackSectionFromCache(packed, nibR, nibG, nibB);
-            }
-            this.packedCacheDirty[idx] = false;
+            this.unpackSection(idx);
         }
+    }
+
+    /** Writes one section's pending packed values back to its nibbles; anything reading the nibble bytes directly mid-task has to call this first. */
+    protected final void unpackSection(final int idx) {
+        if (!this.packedCacheDirty[idx]) return;
+        final int[] packed = this.packedRGBCache[idx];
+        if (packed == null) return;
+
+        final SWMRNibbleArray nibR = this.nibbleCacheR[idx];
+        final SWMRNibbleArray nibG = this.nibbleCacheG[idx];
+        final SWMRNibbleArray nibB = this.nibbleCacheB[idx];
+        if (nibR == null) return;
+
+        final int or = this.packedOr[idx];
+        final int and = this.packedAnd[idx];
+
+        if (and == WHITE && or == WHITE) {
+            nibR.setFull();
+            if (nibG != null) nibG.setFull();
+            if (nibB != null) nibB.setFull();
+        } else if (or == 0) {
+            nibR.setZero();
+            if (nibG != null) nibG.setZero();
+            if (nibB != null) nibB.setZero();
+        } else {
+            unpackSectionFromCache(packed, nibR, nibG, nibB);
+        }
+        this.packedCacheDirty[idx] = false;
     }
 
     protected static void unpackSectionFromCache(final int[] packed, final SWMRNibbleArray nibR, final SWMRNibbleArray nibG, final SWMRNibbleArray nibB) {

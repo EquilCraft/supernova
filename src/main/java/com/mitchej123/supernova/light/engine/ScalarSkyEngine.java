@@ -16,9 +16,16 @@ public class ScalarSkyEngine extends SupernovaEngine {
 
     private final boolean[] nullPropagationCheckCache;
 
+    /**
+     * Null nibbles taken out of the cache by {@link #rewriteNibbleCacheForSkylight()}, by cache index. A section that stops being null is re-initialised in
+     * the same object: the chunk only ever sees the nibbles it already holds, so a replacement would be dropped with the cache.
+     */
+    private final SWMRNibbleArray[] removed;
+
     public ScalarSkyEngine(final World world) {
         super(true, world);
         this.nullPropagationCheckCache = new boolean[WorldUtil.getTotalLightSections()];
+        this.removed = new SWMRNibbleArray[this.nibbleCache.length];
         this.increaseQueue = new long[1 << 18]; // 256K entries -- sky BFS covers far more blocks than block light
         this.decreaseQueue = new long[1 << 18];
     }
@@ -50,34 +57,35 @@ public class ScalarSkyEngine extends SupernovaEngine {
     }
 
     @Override
+    protected void destroyExtraCaches() {
+        Arrays.fill(this.removed, null);
+    }
+
+    /** {@code initRemovedNibbles} is kept for the engine contract only: a nibble that was taken out of the cache is always put back, whoever asks. */
+    @Override
     protected void initNibble(final int chunkX, final int chunkY, final int chunkZ, final boolean extrude, final boolean initRemovedNibbles) {
         if (chunkY < this.minLightSection || chunkY > this.maxLightSection || this.getChunkInCache(chunkX, chunkZ) == null) {
             return;
         }
-        SWMRNibbleArray nib = this.getNibbleFromCache(chunkX, chunkY, chunkZ);
+        final int idx = chunkX + 5 * chunkZ + (5 * 5) * chunkY + this.chunkSectionIndexOffset;
+        final boolean wasRemoved = this.nibbleCache[idx] == null;
+        final SWMRNibbleArray nib = wasRemoved ? this.removed[idx] : this.nibbleCache[idx];
         if (nib == null) {
-            if (!initRemovedNibbles) {
-                return;
-            }
-            this.setNibbleInCache(chunkX, chunkY, chunkZ, nib = new SWMRNibbleArray(null, true));
+            // The chunk holds no nibble object for this section at all, so there is nothing an init could be published through.
+            return;
         }
-        this.initSkyNibble(nib, chunkX, chunkY, chunkZ, extrude);
+        if (nib.isNullNibbleUpdating()) {
+            this.initNullSection(nib, chunkX, chunkY, chunkZ, extrude);
+        }
+        if (wasRemoved) {
+            this.nibbleCache[idx] = nib;
+            this.removed[idx] = null;
+        }
     }
 
-    private void initSkyNibble(final SWMRNibbleArray nibble, final int chunkX, final int chunkY, final int chunkZ, final boolean extrude) {
-        if (chunkY > this.maxSection) {
-            nibble.setFull();
-            return;
-        }
-        if (chunkY < this.minSection) {
-            nibble.setNonNull();
-            nibble.setZero();
-            return;
-        }
-
-        // Sections above the lowest non-empty one are always full sky.
+    private void initNullSection(final SWMRNibbleArray nibble, final int chunkX, final int chunkY, final int chunkZ, final boolean extrude) {
         final boolean[] emptinessMap = this.getEmptinessMap(chunkX, chunkZ);
-        int lowestNonEmpty = this.minSection - 1;
+        int highestNonEmpty = this.minLightSection - 1;
         for (int cy = this.maxSection; cy >= this.minSection; --cy) {
             if (emptinessMap != null) {
                 if (emptinessMap[cy - this.minSection]) continue;
@@ -85,29 +93,30 @@ public class ScalarSkyEngine extends SupernovaEngine {
                 final ExtendedBlockStorage section = this.getChunkSection(chunkX, cy, chunkZ);
                 if (section == null || ((ExtendedSection) section).supernova$hasNoBlocks()) continue;
             }
-            lowestNonEmpty = cy;
+            highestNonEmpty = cy;
             break;
         }
 
-        if (chunkY > lowestNonEmpty) {
+        nibble.setNonNull();
+        if (chunkY > highestNonEmpty) {
             // Above all terrain: full sky whatever the extrude flag says.
-            nibble.setNonNull();
             nibble.setFull();
-        } else if (emptinessMap != null && emptinessMap[chunkY - this.minSection]) {
-            if (extrude) {
-                final SWMRNibbleArray above = this.getNibbleFromCache(chunkX, chunkY + 1, chunkZ);
-                if (above != null && above.isFullUpdating()) {
-                    nibble.setFull();
-                } else {
-                    nibble.setNonNull();
-                    nibble.setZero();
-                }
-            } else {
-                nibble.setNonNull();
-            }
-        } else {
-            nibble.setNonNull();
+            return;
         }
+        if (!extrude) {
+            return;
+        }
+
+        // A null section reads as the bottom layer of the nearest initialised section above it; writing that out is what keeps the init invisible.
+        for (int currY = chunkY + 1; currY <= this.maxLightSection; ++currY) {
+            final SWMRNibbleArray source = this.getNibbleFromCache(chunkX, currY, chunkZ);
+            if (source == null || source.isNullNibbleUpdating()) continue;
+            nibble.extrudeLower(source);
+            return;
+        }
+
+        // Nothing initialised above: open sky.
+        nibble.setFull();
     }
 
     @Override
@@ -118,10 +127,12 @@ public class ScalarSkyEngine extends SupernovaEngine {
         }
     }
 
+    /** Takes null sections out of the cache so the BFS stops at them. */
     private void rewriteNibbleCacheForSkylight() {
         for (int index = 0, max = this.nibbleCache.length; index < max; ++index) {
             final SWMRNibbleArray nibble = this.nibbleCache[index];
             if (nibble != null && nibble.isNullNibbleUpdating()) {
+                this.removed[index] = nibble;
                 this.nibbleCache[index] = null;
                 nibble.updateVisible();
             }
@@ -438,6 +449,15 @@ public class ScalarSkyEngine extends SupernovaEngine {
             }
             this.propagateNeighbourLevels(chunk, this.minLightSection, highestNonEmptySection);
             this.performLightIncrease();
+        }
+    }
+
+    @Override
+    protected void prepareBatchedEdgeChecks(final int chunkX, final int chunkZ) {
+        Arrays.fill(this.nullPropagationCheckCache, false);
+        this.rewriteNibbleCacheForSkylight();
+        for (int y = this.maxLightSection; y >= this.minLightSection; --y) {
+            this.checkNullSection(chunkX, y, chunkZ, true);
         }
     }
 

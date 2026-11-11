@@ -26,10 +26,21 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
     private final boolean[] nullPropagationCheckCache;
     private final IBlockAccess safeBlockAccess;
 
+    /**
+     * Null nibbles taken out of the caches by {@link #rewriteNibbleCacheForSkylight()}, by cache index. A section that stops being null is re-initialised in
+     * these same objects: the chunk only ever sees the nibbles it already holds, so a replacement would be dropped with the cache.
+     */
+    private final SWMRNibbleArray[] removedR;
+    private final SWMRNibbleArray[] removedG;
+    private final SWMRNibbleArray[] removedB;
+
     public SupernovaSkyEngine(final World world, final SnapshotChunkMap chunkMap) {
         super(true, world);
         this.safeBlockAccess = new SafeBlockAccess(chunkMap);
         this.nullPropagationCheckCache = new boolean[WorldUtil.getTotalLightSections()];
+        this.removedR = new SWMRNibbleArray[this.nibbleCache.length];
+        this.removedG = new SWMRNibbleArray[this.nibbleCache.length];
+        this.removedB = new SWMRNibbleArray[this.nibbleCache.length];
         this.increaseQueue = new long[1 << 18]; // 256K entries -- sky BFS covers far more blocks than block light
         this.decreaseQueue = new long[1 << 18]; // 256K entries -- avoids resize churn during initial lighting
     }
@@ -38,45 +49,129 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
     protected boolean isMaxLight(final int level) {return level == WHITE;}
 
     @Override
+    protected void destroyExtraCaches() {
+        super.destroyExtraCaches();
+        Arrays.fill(this.removedR, null);
+        Arrays.fill(this.removedG, null);
+        Arrays.fill(this.removedB, null);
+    }
+
+    /**
+     * Brings a null section to life in all three channels at once. {@code initRemovedNibbles} is kept for the engine contract only: a nibble that was taken
+     * out of the cache is always put back, whoever asks.
+     */
+    @Override
     protected void initNibble(final int chunkX, final int chunkY, final int chunkZ, final boolean extrude, final boolean initRemovedNibbles) {
         if (chunkY < this.minLightSection || chunkY > this.maxLightSection || this.getChunkInCache(chunkX, chunkZ) == null) {
             return;
         }
-        SWMRNibbleArray nibR = this.getNibbleFromCache(chunkX, chunkY, chunkZ);
-        if (nibR == null) {
-            if (!initRemovedNibbles) {
-                return;
-            }
-            this.setNibbleInCache(chunkX, chunkY, chunkZ, nibR = new SWMRNibbleArray(null, true));
-        }
-        this.initNibble(nibR, chunkX, chunkY, chunkZ, extrude);
-
         final int idx = chunkX + 5 * chunkZ + (5 * 5) * chunkY + this.chunkSectionIndexOffset;
-        this.nibbleCacheR[idx] = this.nibbleCache[idx];
+        final boolean removed = this.nibbleCache[idx] == null;
+        final SWMRNibbleArray nibR = removed ? this.removedR[idx] : this.nibbleCache[idx];
+        if (nibR == null) {
+            // The chunk holds no nibble object for this section at all, so there is nothing an init could be published through.
+            return;
+        }
+        final SWMRNibbleArray nibG = removed ? this.removedG[idx] : this.nibbleCacheG[idx];
+        final SWMRNibbleArray nibB = removed ? this.removedB[idx] : this.nibbleCacheB[idx];
 
-        initSkyChannel(this.nibbleCacheG, idx, nibR, initRemovedNibbles);
-        initSkyChannel(this.nibbleCacheB, idx, nibR, initRemovedNibbles);
+        final boolean changed;
+        if (nibR.isNullNibbleUpdating()) {
+            this.initNullSection(nibR, nibG, nibB, chunkX, chunkY, chunkZ, extrude);
+            changed = true;
+        } else {
+            // A green or blue nibble that is still null under an initialised red one reads as "same as red"; make that real before the BFS packs it as 0.
+            changed = followRed(nibG, nibR) | followRed(nibB, nibR);
+        }
 
-        releasePackedArray(this.packedRGBCache[idx]);
-        this.packedRGBCache[idx] = null;
-        this.packedCacheDirty[idx] = false;
+        if (removed) {
+            this.nibbleCache[idx] = nibR;
+            this.nibbleCacheR[idx] = nibR;
+            this.nibbleCacheG[idx] = nibG;
+            this.nibbleCacheB[idx] = nibB;
+            this.removedR[idx] = null;
+            this.removedG[idx] = null;
+            this.removedB[idx] = null;
+        } else {
+            this.nibbleCacheR[idx] = nibR;
+        }
+
+        if (changed || removed) {
+            releasePackedArray(this.packedRGBCache[idx]);
+            this.packedRGBCache[idx] = null;
+            this.packedCacheDirty[idx] = false;
+        }
     }
 
-    /** Mirror R's null/full/zero init state onto a G or B nibble. */
-    private static void initSkyChannel(final SWMRNibbleArray[] cache, final int idx, final SWMRNibbleArray rNibble, final boolean initRemovedNibbles) {
-        SWMRNibbleArray nib = cache[idx];
-        if (nib == null) {
-            if (!initRemovedNibbles) return;
-            cache[idx] = nib = new SWMRNibbleArray(null, true);
+    private void initNullSection(final SWMRNibbleArray nibR, final SWMRNibbleArray nibG, final SWMRNibbleArray nibB, final int chunkX, final int chunkY,
+        final int chunkZ, final boolean extrude) {
+        final boolean[] emptinessMap = this.getEmptinessMap(chunkX, chunkZ);
+
+        int highestNonEmpty = this.minLightSection - 1;
+        for (int currY = this.maxSection; currY >= this.minSection; --currY) {
+            if (emptinessMap == null) {
+                final ExtendedBlockStorage current = this.getChunkSection(chunkX, currY, chunkZ);
+                if (current == null || ((ExtendedSection) current).supernova$hasNoBlocks()) continue;
+            } else if (emptinessMap[currY - this.minSection]) continue;
+            highestNonEmpty = currY;
+            break;
         }
-        if (rNibble.isNullNibbleUpdating()) return;
+
+        if (chunkY > highestNonEmpty) {
+            setFull(nibR);
+            setFull(nibG);
+            setFull(nibB);
+            return;
+        }
+
+        if (!extrude) {
+            nibR.setNonNull();
+            if (nibG != null) nibG.setNonNull();
+            if (nibB != null) nibB.setNonNull();
+            return;
+        }
+
+        // A null section reads as the bottom layer of the nearest initialised section above it; writing that out is what keeps the init invisible.
+        for (int currY = chunkY + 1; currY <= this.maxLightSection; ++currY) {
+            final int srcIdx = chunkX + 5 * chunkZ + (5 * 5) * currY + this.chunkSectionIndexOffset;
+            final SWMRNibbleArray srcR = this.nibbleCache[srcIdx];
+            if (srcR == null || srcR.isNullNibbleUpdating()) continue;
+            // The nibble bytes are stale while the section has unwritten packed values.
+            this.unpackSection(srcIdx);
+            extrude(nibR, srcR);
+            extrude(nibG, usableSource(this.nibbleCacheG[srcIdx], srcR));
+            extrude(nibB, usableSource(this.nibbleCacheB[srcIdx], srcR));
+            return;
+        }
+
+        // Nothing initialised above: open sky.
+        setFull(nibR);
+        setFull(nibG);
+        setFull(nibB);
+    }
+
+    private static void setFull(final SWMRNibbleArray nib) {
+        if (nib == null) return;
         nib.setNonNull();
-        // Extruded and zero-init sections leave G/B at zero for the BFS to fill.
-        if (rNibble.isFullUpdating()) {
-            nib.setFull();
-        } else if (rNibble.isZeroUpdating()) {
-            nib.setZero();
-        }
+        nib.setFull();
+    }
+
+    private static void extrude(final SWMRNibbleArray nib, final SWMRNibbleArray source) {
+        if (nib == null) return;
+        nib.setNonNull();
+        nib.extrudeLower(source);
+    }
+
+    private static SWMRNibbleArray usableSource(final SWMRNibbleArray channel, final SWMRNibbleArray red) {
+        return channel == null || channel.isNullNibbleUpdating() ? red : channel;
+    }
+
+    /** True when the channel had to be filled in from red. */
+    private static boolean followRed(final SWMRNibbleArray channel, final SWMRNibbleArray red) {
+        if (channel == null || !channel.isNullNibbleUpdating()) return false;
+        channel.setNonNull();
+        channel.copyFrom(red);
+        return true;
     }
 
     @Override
@@ -91,44 +186,6 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         releasePackedArray(this.packedRGBCache[idx]);
         this.packedRGBCache[idx] = null;
         this.packedCacheDirty[idx] = false;
-    }
-
-    private void initNibble(final SWMRNibbleArray currNibble, final int chunkX, final int chunkY, final int chunkZ, final boolean extrude) {
-        if (!currNibble.isNullNibbleUpdating()) {
-            return;
-        }
-
-        final boolean[] emptinessMap = this.getEmptinessMap(chunkX, chunkZ);
-
-        int lowestY = this.minLightSection - 1;
-        for (int currY = this.maxSection; currY >= this.minSection; --currY) {
-            if (emptinessMap == null) {
-                final ExtendedBlockStorage current = this.getChunkSection(chunkX, currY, chunkZ);
-                if (current == null || ((ExtendedSection) current).supernova$hasNoBlocks()) continue;
-            } else if (emptinessMap[currY - this.minSection]) continue;
-            lowestY = currY;
-            break;
-        }
-
-        if (chunkY > lowestY) {
-            final SWMRNibbleArray nibble = this.getNibbleFromCache(chunkX, chunkY, chunkZ);
-            nibble.setNonNull();
-            nibble.setFull();
-            return;
-        }
-
-        if (extrude) {
-            for (int currY = chunkY + 1; currY <= this.maxLightSection; ++currY) {
-                final SWMRNibbleArray nibble = this.getNibbleFromCache(chunkX, currY, chunkZ);
-                if (nibble != null && !nibble.isNullNibbleUpdating()) {
-                    currNibble.setNonNull();
-                    currNibble.extrudeLower(nibble);
-                    break;
-                }
-            }
-        } else {
-            currNibble.setNonNull();
-        }
     }
 
     @Override
@@ -185,27 +242,42 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         return ((SupernovaChunk) chunk).isLightUsable();
     }
 
+    /** Takes null sections out of the caches so the BFS stops at them; red decides, green and blue are brought into line with it. */
     private void rewriteNibbleCacheForSkylight() {
         for (int index = 0, max = this.nibbleCache.length; index < max; ++index) {
-            final SWMRNibbleArray nibble = this.nibbleCache[index];
-            if (nibble != null && nibble.isNullNibbleUpdating()) {
-                this.nibbleCache[index] = null;
-                this.nibbleCacheR[index] = null;
-                nibble.updateVisible();
-                releasePackedArray(this.packedRGBCache[index]);
-                this.packedRGBCache[index] = null;
-                this.packedCacheDirty[index] = false;
-            }
+            final SWMRNibbleArray nibR = this.nibbleCache[index];
+            if (nibR == null) continue;
             final SWMRNibbleArray nibG = this.nibbleCacheG[index];
-            if (nibG != null && nibG.isNullNibbleUpdating()) {
-                this.nibbleCacheG[index] = null;
+            final SWMRNibbleArray nibB = this.nibbleCacheB[index];
+
+            if (!nibR.isNullNibbleUpdating()) {
+                if (followRed(nibG, nibR) | followRed(nibB, nibR)) {
+                    releasePackedArray(this.packedRGBCache[index]);
+                    this.packedRGBCache[index] = null;
+                    this.packedCacheDirty[index] = false;
+                }
+                continue;
+            }
+
+            this.removedR[index] = nibR;
+            this.removedG[index] = nibG;
+            this.removedB[index] = nibB;
+            this.nibbleCache[index] = null;
+            this.nibbleCacheR[index] = null;
+            this.nibbleCacheG[index] = null;
+            this.nibbleCacheB[index] = null;
+            nibR.updateVisible();
+            if (nibG != null) {
+                nibG.setNull();
                 nibG.updateVisible();
             }
-            final SWMRNibbleArray nibB = this.nibbleCacheB[index];
-            if (nibB != null && nibB.isNullNibbleUpdating()) {
-                this.nibbleCacheB[index] = null;
+            if (nibB != null) {
+                nibB.setNull();
                 nibB.updateVisible();
             }
+            releasePackedArray(this.packedRGBCache[index]);
+            this.packedRGBCache[index] = null;
+            this.packedCacheDirty[index] = false;
         }
     }
 

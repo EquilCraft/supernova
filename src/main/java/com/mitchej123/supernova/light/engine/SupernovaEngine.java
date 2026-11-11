@@ -582,21 +582,13 @@ public abstract class SupernovaEngine {
             }
             this.lightChunk(chunk, checkEdges);
             this.updateVisible();
-            this.setNibbles(chunk, this.getNibblesFromCache(chunk));
+            // The array built above, not a read-back of the cache: a sky engine takes null nibbles out of its cache, and a section the chunk holds no
+            // nibble object for can never be initialised again.
+            this.setNibbles(chunk, nibbles);
             this.saveExtraLightNibbles(chunk);
         } finally {
             this.destroyCaches();
         }
-    }
-
-    private SWMRNibbleArray[] getNibblesFromCache(final Chunk chunk) {
-        final int chunkX = chunk.xPosition;
-        final int chunkZ = chunk.zPosition;
-        final SWMRNibbleArray[] nibbles = new SWMRNibbleArray[this.maxLightSection - this.minLightSection + 1];
-        for (int cy = this.minLightSection; cy <= this.maxLightSection; ++cy) {
-            nibbles[cy - this.minLightSection] = this.getNibbleFromCache(chunkX, cy, chunkZ);
-        }
-        return nibbles;
     }
 
     public final void checkChunkEdges(final int chunkX, final int chunkZ, final IntOpenHashSet sections) {
