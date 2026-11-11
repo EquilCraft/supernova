@@ -188,18 +188,65 @@ public class ScalarSkyEngine extends SupernovaEngine {
         return 15; // Above all sections = full sky
     }
 
+    /**
+     * Light the direct sky beam holds in a cell, 0 when something above closes the column. Stored light only anchors the walk: a level-15 cell is a beam
+     * cell by definition, and from there down the answer comes from the blocks.
+     */
+    private int skyBeamAt(final int worldX, final int worldY, final int worldZ) {
+        final int topY = (this.maxSection << 4) | 15;
+        int anchorY = worldY;
+        while (anchorY <= topY && this.getLightLevelExtruded(worldX, anchorY, worldZ) != 15) {
+            ++anchorY;
+        }
+        if (anchorY == worldY) {
+            return 15;
+        }
+
+        int beam = 15;
+        Block above = anchorY <= topY ? this.getBlock(worldX, anchorY, worldZ) : Blocks.air;
+        long[] aboveBits = FaceOcclusion.sidedFaceBits(anchorY <= topY ? this.lastBlockId : 0);
+        int aboveMeta = anchorY <= topY ? this.getBlockMeta(worldX, anchorY, worldZ) : 0;
+
+        for (int y = anchorY - 1; y >= worldY; --y) {
+            final Block current = this.getBlock(worldX, y, worldZ);
+            final long[] bits = FaceOcclusion.sidedFaceBits(this.lastBlockId);
+            final int meta = this.getBlockMeta(worldX, y, worldZ);
+
+            if (above.getLightOpacity() > 0 && FaceOcclusion.isFaceSolid(aboveBits, above, aboveMeta, 5)) {
+                return 0;
+            }
+            final int currentOpacity = current.getLightOpacity();
+            if (currentOpacity > 0) {
+                if (FaceOcclusion.isFaceSolid(bits, current, meta, 4)) {
+                    return 0;
+                }
+                beam -= currentOpacity;
+                if (beam <= 0) {
+                    return 0;
+                }
+            }
+
+            above = current;
+            aboveBits = bits;
+            aboveMeta = meta;
+        }
+        return beam;
+    }
+
     private int tryPropagateSkylight(final int worldX, int startY, final int worldZ, final boolean extrudeInitialised, final boolean delayLightSet) {
         final int encodeOffset = this.coordinateOffset;
         final long propagateDirection = AxisDirection.POSITIVE_Y.everythingButThisDirection;
 
-        final int extrudedLevel = this.getLightLevelExtruded(worldX, startY + 1, worldZ);
-        if (extrudedLevel == 0) {
+        // Only a direct beam travels down unattenuated. The stored level above says nothing about that: under an overhang it is light that leaked in
+        // sideways, and carrying it down the column would leave every cell below as bright as the top one.
+        final int beamAbove = this.skyBeamAt(worldX, startY + 1, worldZ);
+        if (beamAbove == 0) {
             return startY;
         }
 
         this.checkNullSection(worldX >> 4, startY >> 4, worldZ >> 4, extrudeInitialised);
 
-        int currentSky = extrudedLevel;
+        int currentSky = beamAbove;
 
         Block above = this.getBlock(worldX, startY + 1, worldZ);
         long[] aboveBits = FaceOcclusion.sidedFaceBits(this.lastBlockId);

@@ -11,6 +11,7 @@ import com.mitchej123.supernova.light.SWMRNibbleArray;
 import com.mitchej123.supernova.light.SupernovaChunk;
 import com.mitchej123.supernova.util.SnapshotChunkMap;
 import com.mitchej123.supernova.util.WorldUtil;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import net.minecraft.block.Block;
 import net.minecraft.init.Blocks;
 import net.minecraft.world.IBlockAccess;
@@ -34,6 +35,19 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
     private final SWMRNibbleArray[] removedG;
     private final SWMRNibbleArray[] removedB;
 
+    /** Columns of the 5x5-chunk cache window. */
+    private static final int WINDOW = 5 * 16;
+
+    /**
+     * How far down the direct beam gets in each column of the window, scanned from the blocks on first use within a task: the lowest y it still reaches
+     * untinted, and the lowest y it reaches at all. One above the build height when it reaches nothing. An entry is valid while its stamp is the current
+     * one.
+     */
+    private final int[] beamWhiteEnd = new int[WINDOW * WINDOW];
+    private final int[] beamEnd = new int[WINDOW * WINDOW];
+    private final int[] beamColumnStamp = new int[WINDOW * WINDOW];
+    private int beamStamp = 1;
+
     public SupernovaSkyEngine(final World world, final SnapshotChunkMap chunkMap) {
         super(true, world);
         this.safeBlockAccess = new SafeBlockAccess(chunkMap);
@@ -54,6 +68,11 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         Arrays.fill(this.removedR, null);
         Arrays.fill(this.removedG, null);
         Arrays.fill(this.removedB, null);
+        // The next task reads the blocks afresh.
+        if (++this.beamStamp == 0) {
+            Arrays.fill(this.beamColumnStamp, 0);
+            this.beamStamp = 1;
+        }
     }
 
     /**
@@ -466,19 +485,29 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         }
     }
 
+    /**
+     * The direct beam is to sky light what emission is to block light: the level a cell holds with no help from its neighbours. Reset the cell to it, send
+     * it out again, and let the decrease take back whatever the old level handed on that is no longer backed.
+     */
     @Override
     protected void checkBlock(final int worldX, final int worldY, final int worldZ) {
-        final int encodeOffset = this.coordinateOffset;
         final int currentLevel = this.getLightLevel(worldX, worldY, worldZ);
+        final int beam = this.skyBeamAt(worldX, worldY, worldZ);
+        final long position = encodeCoords(worldX, worldZ, worldY, this.coordinateOffset);
 
-        if (currentLevel == WHITE) {
-            // WHITE is a sky source: re-propagate, never decrease.
-            this.appendToIncreaseQueue(encodeCoords(worldX, worldZ, worldY, encodeOffset)
-                    | PackedColorLightQueue.encodeQueuePackedRGB(currentLevel)
-                    | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT));
-        } else {
-            this.setLightLevel(worldX, worldY, worldZ, 0);
-            this.appendToDecreaseQueue(encodeCoords(worldX, worldZ, worldY, encodeOffset)
+        this.setLightLevel(worldX, worldY, worldZ, beam);
+
+        if (beam != 0) {
+            final int sectionIndex = (worldX >> 4) + 5 * (worldZ >> 4) + (5 * 5) * (worldY >> 4) + this.chunkSectionIndexOffset;
+            this.appendToIncreaseQueue(position
+                    | PackedColorLightQueue.encodeQueuePackedRGB(beam)
+                    | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT)
+                    | sidedFlag(this.getBlockIdFast(sectionIndex, worldX & 15, worldY & 15, worldZ & 15)));
+        }
+
+        // A cell that was and stays in the whole beam handed on nothing it cannot hand on again.
+        if (currentLevel != WHITE || beam != WHITE) {
+            this.appendToDecreaseQueue(position
                     | PackedColorLightQueue.encodeQueuePackedRGB(currentLevel)
                     | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT));
         }
@@ -486,9 +515,9 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
 
     @Override
     protected int calculateLightValue(final int worldX, final int worldY, final int worldZ, final int expect) {
-
-        if (expect == WHITE) {
-            return expect;
+        int level = this.skyBeamAt(worldX, worldY, worldZ);
+        if (level == WHITE || PackedColorLight.anyComponentGreater(level, expect)) {
+            return level;
         }
 
         final int sectionOffset = this.chunkSectionIndexOffset;
@@ -499,7 +528,6 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         final int fixedAbsorption = isSided ? 0
                 : TranslucencyRegistry.getPackedAbsorption(this.safeBlockAccess, centerBlock, meta, worldX, worldY, worldZ);
 
-        int level = 0;
         for (final AxisDirection direction : AXIS_DIRECTIONS) {
             final int offX = worldX + direction.x;
             final int offY = worldY + direction.y;
@@ -521,48 +549,113 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         return level;
     }
 
+    /**
+     * Highest first. A change is judged by the beam the blocks above it allow now, and those already include every other change of the task: taken bottom
+     * up, a block set under another new one would find its column closed, leave it alone, and darken its own cell, which is where the walk down from the
+     * upper block then stops, with the old beam still standing below both.
+     */
+    @Override
+    protected void processBlockPositionChanges(final Chunk chunk, final int chunkX, final int chunkZ, final IntOpenHashSet changedPositions) {
+        final int minBlockY = WorldUtil.getMinBlockY();
+        final int maxBlockY = WorldUtil.getMaxBlockY();
+        // y sits above x and z in the packed position, so plain int order is height order.
+        final int[] positions = changedPositions.toIntArray();
+        Arrays.sort(positions);
+        for (int i = positions.length - 1; i >= 0; --i) {
+            final int packed = positions[i];
+            final int worldY = packed >> 8;
+            if (worldY < minBlockY || worldY > maxBlockY) {
+                continue;
+            }
+            this.lastPositionsProcessed++;
+            this.propagateBlockChanges(chunk, (chunkX << 4) | (packed & 15), worldY, (chunkZ << 4) | ((packed >> 4) & 15));
+        }
+    }
+
     @Override
     protected void propagateBlockChanges(final Chunk atChunk, final int blockX, final int blockY, final int blockZ) {
         this.rewriteNibbleCacheForSkylight();
         Arrays.fill(this.nullPropagationCheckCache, false);
 
-        final int maxPropagationY = this.tryPropagateSkylight(blockX, blockY, blockZ, true, true);
+        this.checkNullSection(blockX >> 4, blockY >> 4, blockZ >> 4, true);
 
-        final long propagateDirection = AxisDirection.POSITIVE_Y.everythingButThisDirection;
-        final int encodeOffset = this.coordinateOffset;
-
-        final int extrudedLevel = this.getLightLevelExtruded(blockX, maxPropagationY, blockZ);
-        if (extrudedLevel == WHITE) {
-            this.checkNullSection(blockX >> 4, maxPropagationY >> 4, blockZ >> 4, true);
-
-            for (int currY = maxPropagationY; currY >= (this.minLightSection << 4); --currY) {
-                if ((currY & 15) == 15) {
-                    this.checkNullSection(blockX >> 4, currY >> 4, blockZ >> 4, true);
-                }
-
-                final SWMRNibbleArray nibR = this.nibbleCacheR[(blockX >> 4) + 5 * (blockZ >> 4) + (5 * 5) * (currY >> 4) + this.chunkSectionIndexOffset];
-                if (nibR == null) {
-                    currY = currY & ~15;
-                    continue;
-                }
-
-                final int currentRGB = this.getLightLevel(blockX, currY, blockZ);
-                if (currentRGB != WHITE) {
-                    break;
-                }
-
-                this.appendToDecreaseQueue(encodeCoords(blockX, blockZ, currY, encodeOffset) | PackedColorLightQueue.encodeQueuePackedRGB(WHITE) | (
-                        propagateDirection
-                                << RGB_DIR_SHIFT));
-            }
+        // A block changes the beam only underneath itself, and only where one arrives from above in the first place. Light in the cell means the beam
+        // may have gone on below the old block.
+        if (this.skyBeamAt(blockX, blockY + 1, blockZ) != 0
+            && (this.getLightLevelExtruded(blockX, blockY, blockZ) != 0 || this.skyBeamAt(blockX, blockY, blockZ) != 0)) {
+            this.queueBeamBelow(blockX, blockY, blockZ);
+            // Written only now that the walk is over: a null section it brought to life on the way was filled in from the layer above it, and that
+            // layer had to still hold the light as it was for the queued entries to describe the new section too.
+            this.applyQueuedLevels(this.decreaseQueue, this.decreaseQueueInitialLength, false);
+            this.applyQueuedLevels(this.increaseQueue, this.increaseQueueInitialLength, true);
         }
-
-        this.applyDelayedQueue(this.increaseQueue, this.increaseQueueInitialLength, true);
-        this.applyDelayedQueue(this.decreaseQueue, this.decreaseQueueInitialLength, false);
 
         this.checkBlock(blockX, blockY, blockZ);
 
         this.performLightDecrease();
+    }
+
+    /** Sets each queued cell to the level its entry carries, or to 0. Where a cell is in both queues the increase entry, applied last, wins. */
+    private void applyQueuedLevels(final long[] queue, final int len, final boolean useLevel) {
+        final int decodeOffsetX = -this.encodeOffsetX;
+        final int decodeOffsetY = -this.encodeOffsetY;
+        final int decodeOffsetZ = -this.encodeOffsetZ;
+
+        for (int i = 0; i < len; ++i) {
+            final long queueValue = queue[i];
+            final int posX = ((int) queueValue & 63) + decodeOffsetX;
+            final int posZ = (((int) queueValue >>> 6) & 63) + decodeOffsetZ;
+            final int posY = (((int) queueValue >>> 12) & COORD_Y_MASK) + decodeOffsetY;
+            this.setLightLevel(posX, posY, posZ, useLevel ? PackedColorLightQueue.decodeQueueRGB(queueValue) : 0);
+        }
+    }
+
+    /**
+     * Queues what brings the column under a changed block in line with the beam the blocks now allow: cells it newly reaches are raised to it, cells that
+     * hold more than it gives are reset and left to the decrease, which re-lights from the sides whatever is still backed. Nothing is written here.
+     * <p>
+     * The walk ends at the first cell that is dark and meant to be, not at the first block that stops a beam: several edits to one column arrive as one
+     * task, so such a block may be as new as the one above it, with the old beam still standing underneath.
+     */
+    private void queueBeamBelow(final int blockX, final int blockY, final int blockZ) {
+        final int encodeOffset = this.coordinateOffset;
+        final long directions = AxisDirection.POSITIVE_Y.everythingButThisDirection;
+        final int bottomY = this.minLightSection << 4;
+        final int chunkX = blockX >> 4;
+        final int chunkZ = blockZ >> 4;
+
+        for (int y = blockY - 1; y >= bottomY; --y) {
+            if ((y & 15) == 15) {
+                this.checkNullSection(chunkX, y >> 4, chunkZ, true);
+            }
+
+            final int sectionIndex = chunkX + 5 * chunkZ + (5 * 5) * (y >> 4) + this.chunkSectionIndexOffset;
+            if (this.nibbleCacheR[sectionIndex] == null) {
+                // A null section stores nothing; carry on underneath it.
+                y &= ~15;
+                continue;
+            }
+
+            final int beam = this.skyBeamAt(blockX, y, blockZ);
+            final int stored = this.getLightLevel(blockX, y, blockZ);
+            if (stored == beam) {
+                if (beam == 0) {
+                    return;
+                }
+                continue;
+            }
+
+            final long position = encodeCoords(blockX, blockZ, y, encodeOffset);
+            if (beam != 0) {
+                this.appendToIncreaseQueue(position | PackedColorLightQueue.encodeQueuePackedRGB(beam) | (directions << RGB_DIR_SHIFT)
+                        | sidedFlag(this.getBlockIdFast(sectionIndex, blockX & 15, y & 15, blockZ & 15)));
+            }
+            if (PackedColorLight.anyComponentGreater(stored, beam)) {
+                // Every direction, upward too: a cell the beam never reached is lit from its neighbours, the one above included, and only a decrease
+                // that visits them makes them hand that light back.
+                this.appendToDecreaseQueue(position | PackedColorLightQueue.encodeQueuePackedRGB(stored) | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT));
+            }
+        }
     }
 
     @Override
@@ -622,7 +715,7 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
             final int startY = highestNonEmptySection << 4 | 15;
             for (int currZ = minZ; currZ <= maxZ; ++currZ) {
                 for (int currX = minX; currX <= maxX; ++currX) {
-                    this.tryPropagateSkylight(currX, startY + 1, currZ, false, false);
+                    this.tryPropagateSkylight(currX, startY + 1, currZ, false);
                 }
             }
         }
@@ -642,33 +735,135 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
         }
     }
 
-    private void applyDelayedQueue(final long[] queue, final int len, final boolean usePackedLevel) {
-        final int decodeOffsetX = -this.encodeOffsetX;
-        final int decodeOffsetY = -this.encodeOffsetY;
-        final int decodeOffsetZ = -this.encodeOffsetZ;
-
-        for (int i = 0; i < len; ++i) {
-            final long queueValue = queue[i];
-            final int posX = ((int) queueValue & 63) + decodeOffsetX;
-            final int posZ = (((int) queueValue >>> 6) & 63) + decodeOffsetZ;
-            final int posY = (((int) queueValue >>> 12) & 0xFFFF) + decodeOffsetY;
-            final int level = usePackedLevel ? PackedColorLightQueue.decodeQueueRGB(queueValue) : 0;
-            this.setLightLevel(posX, posY, posZ, level);
-        }
+    private int columnIndex(final int worldX, final int worldZ) {
+        return ((((worldX >> 4) + this.chunkOffsetX) << 4) | (worldX & 15)) + WINDOW * ((((worldZ >> 4) + this.chunkOffsetZ) << 4) | (worldZ & 15));
     }
 
-    private int tryPropagateSkylight(final int worldX, int startY, final int worldZ, final boolean extrudeInitialised, final boolean delayLightSet) {
+    /**
+     * Light the direct sky beam holds in a cell, 0 where something above closes the column. Read from the blocks alone: stored light cannot tell a beam
+     * from light that leaked in sideways.
+     */
+    private int skyBeamAt(final int worldX, final int worldY, final int worldZ) {
+        final int topY = (this.maxSection << 4) | 15;
+        if (worldY > topY) {
+            return WHITE;
+        }
+        final int column = this.columnIndex(worldX, worldZ);
+        if (this.beamColumnStamp[column] != this.beamStamp) {
+            this.scanBeamColumn(worldX, worldZ, column);
+        }
+        if (worldY >= this.beamWhiteEnd[column]) {
+            return WHITE;
+        }
+        if (worldY < this.beamEnd[column]) {
+            return 0;
+        }
+
+        // The tinted stretch: replay what the blocks took out, starting where the beam was last whole.
+        int beam = WHITE;
+        for (int y = Math.min(this.beamWhiteEnd[column] - 1, topY); y >= worldY; --y) {
+            final Block block = this.getBlock(worldX, y, worldZ);
+            if (block == Blocks.air || !this.absorbsSkyBeam(block, this.lastBlockId, block.getLightOpacity())) {
+                continue;
+            }
+            beam = PackedColorLight.packedSubRGB(beam,
+                TranslucencyRegistry.getPackedAbsorption(this.safeBlockAccess, block, this.getBlockMeta(worldX, y, worldZ), worldX, y, worldZ));
+        }
+        return beam;
+    }
+
+    private void scanBeamColumn(final int worldX, final int worldZ, final int column) {
+        final int topY = (this.maxSection << 4) | 15;
+        final int bottomY = this.minLightSection << 4;
+        final int sectionBase = (worldX >> 4) + 5 * (worldZ >> 4) + this.chunkSectionIndexOffset;
+
+        int whiteEnd = topY + 1;
+        int end = topY + 1;
+        int beam = WHITE;
+
+        Block above = Blocks.air;
+        long[] aboveBits = FaceOcclusion.NOT_SIDED;
+        int aboveMeta = 0;
+
+        scan:
+        for (int sectionY = topY >> 4; (sectionY << 4) >= bottomY; --sectionY) {
+            final int sectionIndex = sectionBase + (5 * 5) * sectionY;
+            final ExtendedBlockStorage section = this.sectionCache[sectionIndex];
+
+            if (section == null || ((ExtendedSection) section).supernova$hasNoBlocks()) {
+                // Nothing in here to stop or tint it; only the block resting on top of the section can.
+                if (above.getLightOpacity() > 0 && FaceOcclusion.isFaceSolid(aboveBits, above, aboveMeta, 5)) {
+                    break;
+                }
+                end = sectionY << 4;
+                if (beam == WHITE) whiteEnd = end;
+                above = Blocks.air;
+                aboveBits = FaceOcclusion.NOT_SIDED;
+                aboveMeta = 0;
+                continue;
+            }
+
+            for (int y = (sectionY << 4) | 15; y >= (sectionY << 4); --y) {
+                final Block current = this.getBlockFast(sectionIndex, worldX & 15, y & 15, worldZ & 15);
+                final int currentId = this.lastBlockId;
+
+                // Light must leave the block above through its bottom face (axisDir 5)...
+                if (above.getLightOpacity() > 0 && FaceOcclusion.isFaceSolid(aboveBits, above, aboveMeta, 5)) {
+                    break scan;
+                }
+
+                long[] bits = FaceOcclusion.NOT_SIDED;
+                int meta = 0;
+                if (current != Blocks.air) {
+                    meta = section.getExtBlockMetadata(worldX & 15, y & 15, worldZ & 15);
+                    bits = FaceOcclusion.sidedFaceBits(currentId);
+                    final int opacity = current.getLightOpacity();
+                    // ...and enter this one through its top face (4).
+                    if (opacity > 0 && FaceOcclusion.isFaceSolid(bits, current, meta, 4)) {
+                        break scan;
+                    }
+                    if (this.absorbsSkyBeam(current, currentId, opacity)) {
+                        beam = PackedColorLight.packedSubRGB(beam,
+                            TranslucencyRegistry.getPackedAbsorption(this.safeBlockAccess, current, meta, worldX, y, worldZ));
+                        if (PackedColorLight.maxComponent(beam) == 0) {
+                            break scan;
+                        }
+                    }
+                }
+
+                end = y;
+                if (beam == WHITE) whiteEnd = y;
+                above = current;
+                aboveBits = bits;
+                aboveMeta = meta;
+            }
+        }
+
+        this.beamWhiteEnd[column] = whiteEnd;
+        this.beamEnd[column] = end;
+        this.beamColumnStamp[column] = this.beamStamp;
+    }
+
+    /** Blocks the beam passes through at a cost; everything else either lets it through whole or stops it at a face. */
+    private boolean absorbsSkyBeam(final Block block, final int blockId, final int opacity) {
+        return block instanceof ColoredTranslucency || block instanceof PositionalColoredTranslucency || TranslucencyRegistry.hasExplicitEntry(blockId)
+            || opacity > 1;
+    }
+
+    /** Initial lighting only: writes the beam down one column of a chunk whose nibbles are still blank and queues it to spread sideways. */
+    private int tryPropagateSkylight(final int worldX, int startY, final int worldZ, final boolean extrudeInitialised) {
         final int encodeOffset = this.coordinateOffset;
         final long propagateDirection = AxisDirection.POSITIVE_Y.everythingButThisDirection;
 
-        final int extrudedLevel = this.getLightLevelExtruded(worldX, startY + 1, worldZ);
-        if (PackedColorLight.maxComponent(extrudedLevel) == 0) {
+        // Only a direct beam travels down unattenuated; light that leaked in sideways under an overhang decays like any other.
+        final int beamAbove = this.skyBeamAt(worldX, startY + 1, worldZ);
+        if (beamAbove == 0) {
             return startY;
         }
 
         this.checkNullSection(worldX >> 4, startY >> 4, worldZ >> 4, extrudeInitialised);
 
-        int currentSkyRGB = extrudedLevel;
+        int currentSkyRGB = beamAbove;
 
         // Loop-carried: this iteration's current block is the next one's above.
         Block above = this.getBlock(worldX, startY + 1, worldZ);
@@ -696,8 +891,7 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
                 break;
             }
 
-            if (current instanceof ColoredTranslucency || current instanceof PositionalColoredTranslucency || TranslucencyRegistry.hasExplicitEntry(currentId)
-                    || currentOpacity > 1) {
+            if (this.absorbsSkyBeam(current, currentId, currentOpacity)) {
                 currentSkyRGB = PackedColorLight.packedSubRGB(currentSkyRGB, TranslucencyRegistry.getPackedAbsorption(this.safeBlockAccess, current, meta, worldX, startY, worldZ));
             }
 
@@ -713,14 +907,10 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
                 --this.increaseQueueInitialLength;
                 startY = startY & ~15;
                 above = Blocks.air;
-                aboveBits = FaceOcclusion.sidedFaceBits(Block.getIdFromBlock(Blocks.air));
+                aboveBits = FaceOcclusion.NOT_SIDED;
                 aboveMeta = 0;
-            } else if (!delayLightSet) {
-                this.setLightLevel(worldX, startY, worldZ, currentSkyRGB);
-                above = current;
-                aboveBits = bits;
-                aboveMeta = meta;
             } else {
+                this.setLightLevel(worldX, startY, worldZ, currentSkyRGB);
                 above = current;
                 aboveBits = bits;
                 aboveMeta = meta;
@@ -912,12 +1102,18 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
 
                 final int keptRGB = currentRGB & keptMask;
 
-                // Sky light has no per-block emission
-                if (this.setLightLevelInCache(sectionIndex, localIndex, keptRGB)) {
+                // A cell the beam reaches never drops below it. Whole-beam cells were dealt with above, so in practice this is the tinted beam under
+                // coloured glass, which no neighbour could restore.
+                final int beamRGB = this.skyBeamAt(offX, offY, offZ);
+                final int newRGB = beamRGB == 0 ? keptRGB : PackedColorLight.packedMax(keptRGB, beamRGB);
+
+                // Set at once, as a block source's emission is: a later wave in this pass has to see what this one left.
+                if (this.setLightLevelInCache(sectionIndex, localIndex, newRGB)) {
                     this.postLightUpdate(sectionIndex, localIndex);
                 }
 
-                if (keptRGB != 0) {
+                if (newRGB != 0) {
+                    final long flags = FLAG_RECHECK_LEVEL;
                     if (increaseQueueLength >= increaseQueue.length) {
                         if (increaseQueue.length >= MAX_QUEUE_SIZE) {
                             this.queueOverflowed = true;
@@ -926,15 +1122,15 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
                         increaseQueue = this.resizeIncreaseQueue();
                     }
                     increaseQueue[increaseQueueLength++] = encodeCoords(offX, offZ, offY, encodeOffset)
-                            | PackedColorLightQueue.encodeQueuePackedRGB(keptRGB)
+                            | PackedColorLightQueue.encodeQueuePackedRGB(newRGB)
                             | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT)
-                            | FLAG_RECHECK_LEVEL
+                            | flags
                             | sFlag;
                 }
 
-                // channelPresenceMask stops re-propagating channels a prior visit from another direction already zeroed.
-                final int clearedMask = ~keptMask & PackedColorLight.ALL_CHANNELS;
-                final int decreaseRGB = targetRGB & clearedMask & PackedColorLight.channelPresenceMask(currentRGB);
+                // Only what the cell actually lost travels on. A cleared channel its own emission or beam still covers handed its neighbours nothing
+                // that depended on the wave's source, and re-sending it from every such cell would bounce the wave between them without end.
+                final int decreaseRGB = targetRGB & PackedColorLightQueue.channelMaskWhereGt(currentRGB, newRGB);
                 if (PackedColorLight.anyNonZero(decreaseRGB)) {
                     if (queueLength >= queue.length) {
                         if (queue.length >= MAX_QUEUE_SIZE) {
