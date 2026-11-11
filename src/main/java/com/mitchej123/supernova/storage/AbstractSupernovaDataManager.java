@@ -46,8 +46,16 @@ abstract class AbstractSupernovaDataManager
     private static final int CHANNEL_G = 1;
     private static final int CHANNEL_B = 2;
 
-    // Flag byte + up to 3 * 2048 bytes per section, 16 sections
-    private static final int MAX_PACKET_BYTES = 16 * (1 + 3 * SWMRNibbleArray.ARRAY_SIZE);
+    /**
+     * First byte of the block that follows the per-mask records of a full chunk: a mask of further sections, then their records. The chunk packet only
+     * names sections that hold blocks, but light does not stop at them: the air over a lit roof and the shadow under an overhang live in sections with no
+     * storage at all. ChunkAPI hands each manager its own length-prefixed slice, so a peer without this block simply never reads it, and one that expects
+     * it finds the slice exhausted. A partial update never carries it.
+     */
+    static final byte EXTRA_SECTIONS_MARKER = (byte) 0xE1;
+
+    // Flag byte + up to 3 * 2048 bytes per section, 16 sections, plus the marker and mask of the extra-section block
+    private static final int MAX_PACKET_BYTES = 16 * (1 + 3 * SWMRNibbleArray.ARRAY_SIZE) + 3;
     private static final int MAX_PACKET_BYTES_CUBIC = 1 + 3 * SWMRNibbleArray.ARRAY_SIZE;
 
     private static final byte FLAG_R = 1;
@@ -280,19 +288,114 @@ abstract class AbstractSupernovaDataManager
     @Override
     public void writeToBuffer(Chunk chunk, int subChunkMask, boolean forceUpdate, ByteBuffer buffer) {
         final SupernovaChunk ext = (SupernovaChunk) chunk;
-        for (int sectionY = 0; sectionY < 16; ++sectionY) {
-            if ((subChunkMask & (1 << sectionY)) == 0) continue;
-            writeSectionToBuffer(buffer, getNibblesR(ext), getNibblesG(ext), getNibblesB(ext), sectionY);
-        }
+        writeChunkToBuffer(buffer, getNibblesR(ext), getNibblesG(ext), getNibblesB(ext), subChunkMask, forceUpdate, this.sky);
     }
 
     @Override
     public void readFromBuffer(Chunk chunk, int subChunkMask, boolean forceUpdate, ByteBuffer buffer) {
         final SupernovaChunk ext = (SupernovaChunk) chunk;
+        readChunkFromBuffer(buffer, getNibblesR(ext), getNibblesG(ext), getNibblesB(ext), subChunkMask, forceUpdate);
+    }
+
+    /**
+     * @param fullChunk false for a partial update: the receiver keeps every section the update does not name, vanilla light included, so nothing but the
+     *                  named sections may go out
+     * @param sky       which lane these nibbles are; it decides what the receiver can infer on its own and need not be sent
+     */
+    static void writeChunkToBuffer(ByteBuffer buffer, SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles,
+        int subChunkMask, boolean fullChunk, boolean sky) {
         for (int sectionY = 0; sectionY < 16; ++sectionY) {
             if ((subChunkMask & (1 << sectionY)) == 0) continue;
-            readSectionFromBuffer(buffer, getNibblesR(ext), getNibblesG(ext), getNibblesB(ext), sectionY);
+            writeSectionToBuffer(buffer, rNibbles, gNibbles, bNibbles, sectionY);
         }
+        if (!fullChunk) return;
+
+        // A section left out reads as absent on the receiver: no block light, and sky inherited from above. Sending one that would read the same anyway
+        // only costs bandwidth, and above the terrain that is nearly every section.
+        int extraMask = 0;
+        boolean openSkyAbove = true;
+        for (int sectionY = 15; sectionY >= 0; --sectionY) {
+            final boolean absent = !holdsLight(rNibbles, sectionY) && !holdsLight(gNibbles, sectionY) && !holdsLight(bNibbles, sectionY);
+            final boolean full = !absent && isFullSky(rNibbles, gNibbles, bNibbles, sectionY);
+            if ((subChunkMask & (1 << sectionY)) == 0 && !absent) {
+                final boolean inferable = sky ? openSkyAbove && full : isDarkBlock(rNibbles, gNibbles, bNibbles, sectionY);
+                if (!inferable) extraMask |= 1 << sectionY;
+            }
+            openSkyAbove &= absent || full;
+        }
+        // Byte by byte: the slice's byte order is ChunkAPI's business.
+        buffer.put(EXTRA_SECTIONS_MARKER);
+        buffer.put((byte) extraMask);
+        buffer.put((byte) (extraMask >>> 8));
+        for (int sectionY = 0; sectionY < 16; ++sectionY) {
+            if ((extraMask & (1 << sectionY)) == 0) continue;
+            writeSectionToBuffer(buffer, rNibbles, gNibbles, bNibbles, sectionY);
+        }
+    }
+
+    /** Green and blue mirror red where they are absent. */
+    private static boolean isFullSky(SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles, int sectionY) {
+        final SWMRNibbleArray r = nibbleAt(rNibbles, sectionY);
+        if (r == null || r.isNullNibbleVisible() || !r.isFullVisible()) return false;
+        return isFullOrAbsent(nibbleAt(gNibbles, sectionY)) && isFullOrAbsent(nibbleAt(bNibbles, sectionY));
+    }
+
+    private static boolean isFullOrAbsent(final SWMRNibbleArray nib) {
+        return nib == null || nib.isNullNibbleVisible() || nib.isFullVisible();
+    }
+
+    private static boolean isDarkBlock(SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles, int sectionY) {
+        return isDarkOrAbsent(nibbleAt(rNibbles, sectionY)) && isDarkOrAbsent(nibbleAt(gNibbles, sectionY)) && isDarkOrAbsent(nibbleAt(bNibbles, sectionY));
+    }
+
+    private static boolean isDarkOrAbsent(final SWMRNibbleArray nib) {
+        return nib == null || nib.isNullNibbleVisible() || nib.isDarkVisible();
+    }
+
+    static void readChunkFromBuffer(ByteBuffer buffer, SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles,
+        int subChunkMask, boolean forceUpdate) {
+        int absentMask = 0;
+        for (int sectionY = 0; sectionY < 16; ++sectionY) {
+            if ((subChunkMask & (1 << sectionY)) == 0) continue;
+            if (!readSectionFromBuffer(buffer, rNibbles, gNibbles, bNibbles, sectionY)) absentMask |= 1 << sectionY;
+        }
+
+        // A sender without the extra-section block leaves nothing behind the per-mask records.
+        if (buffer.remaining() < 3 || buffer.get(buffer.position()) != EXTRA_SECTIONS_MARKER) return;
+        buffer.get();
+        final int extraMask = (buffer.get() & 0xFF) | ((buffer.get() & 0xFF) << 8);
+
+        if (forceUpdate) {
+            // The whole chunk was sent and every section holding light is on the wire, so one that is not has none: a nibble left from an earlier
+            // version of this chunk would be stale light nobody ever corrects.
+            for (int sectionY = 0; sectionY < 16; ++sectionY) {
+                final int bit = 1 << sectionY;
+                if ((extraMask & bit) != 0) continue;
+                if ((subChunkMask & bit) != 0 && (absentMask & bit) == 0) continue;
+                setNullNibble(rNibbles, sectionY);
+                setNullNibble(gNibbles, sectionY);
+                setNullNibble(bNibbles, sectionY);
+            }
+        }
+
+        for (int sectionY = 0; sectionY < 16; ++sectionY) {
+            if ((extraMask & (1 << sectionY)) == 0) continue;
+            readSectionFromBuffer(buffer, rNibbles, gNibbles, bNibbles, sectionY);
+        }
+    }
+
+    private static boolean holdsLight(final SWMRNibbleArray[] nibbles, final int sectionY) {
+        final SWMRNibbleArray nib = nibbleAt(nibbles, sectionY);
+        return nib != null && !nib.isNullNibbleVisible();
+    }
+
+    private static void setNullNibble(SWMRNibbleArray[] nibbles, int sectionY) {
+        if (nibbles == null) return;
+        final int idx = nibbleIndex(sectionY);
+        if (idx < 0 || idx >= nibbles.length) return;
+        final SWMRNibbleArray nib = nibbles[idx];
+        if (nib == null || nib.isNullNibbleVisible()) return;
+        nibbles[idx] = new SWMRNibbleArray(null, true);
     }
 
     @Override
@@ -391,7 +494,8 @@ abstract class AbstractSupernovaDataManager
         return nibble != null && !dark && !nibble.isNullNibbleVisible();
     }
 
-    static void readSectionFromBuffer(ByteBuffer buffer, SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles, int sectionY) {
+    /** False when the record carried no light in any channel, i.e. the sender's nibbles for this section are null. */
+    static boolean readSectionFromBuffer(ByteBuffer buffer, SWMRNibbleArray[] rNibbles, SWMRNibbleArray[] gNibbles, SWMRNibbleArray[] bNibbles, int sectionY) {
         final byte flags = buffer.get();
         final boolean hasR = (flags & FLAG_R) != 0;
         final boolean hasG = (flags & FLAG_G) != 0;
@@ -407,9 +511,9 @@ abstract class AbstractSupernovaDataManager
             if (hasG) gData = readRawFromBuffer(buffer);
             if (hasB) bData = readRawFromBuffer(buffer);
 
-            if (rNibbles == null) return;
+            if (rNibbles == null) return flags != 0;
             final int idx = nibbleIndex(sectionY);
-            if (idx < 0 || idx >= rNibbles.length) return;
+            if (idx < 0 || idx >= rNibbles.length) return flags != 0;
 
             if (rData == null && (gData != null || bData != null)) {
                 rData = new byte[SWMRNibbleArray.ARRAY_SIZE];
@@ -444,6 +548,7 @@ abstract class AbstractSupernovaDataManager
                 cloneNibbleChannel(rNibbles, bNibbles, sectionY);
             }
         }
+        return flags != 0;
     }
 
     private static byte[] readRawFromBuffer(ByteBuffer buffer) {
