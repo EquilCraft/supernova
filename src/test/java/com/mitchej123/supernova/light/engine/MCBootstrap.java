@@ -29,6 +29,20 @@ public final class MCBootstrap {
         public static final int INDEX_PROBE = 200;
         public static final int TILE_LAMP = 201;
         public static final int GREEN_EDGE_LAMP = 203;
+        public static final int SIM_LAMP = 210;
+        public static final int SIM_RED_LAMP = 211;
+        public static final int SIM_GLASS = 212;
+        public static final int RND_LAMP = 230;
+        public static final int RND_DIM_LAMP = 231;
+        public static final int RND_ORANGE_LAMP = 232;
+        public static final int RND_BLUE_LAMP = 233;
+        public static final int RND_GLASS = 234;
+        public static final int RND_WATER = 235;
+        public static final int RND_SOLID_LAMP = 236;
+        public static final int RND_BOTTOM_SLAB = 237;
+        public static final int RND_TOP_SLAB = 238;
+        public static final int RND_TINTED_GLASS = 239;
+        public static final int TINTED_GLASS = 240;
         public static final int DIM_RED_LAMP = 241;
         public static final int REMAP_LAMP = 300, REMAP_LAMP_TARGET = 555;
         public static final int REMAP_GLASS = 310, REMAP_GLASS_TARGET = 600;
@@ -102,10 +116,15 @@ public final class MCBootstrap {
     }
 
     public static World createStubWorld(boolean remote) {
+        return createStubWorld(WorldServer.class, remote);
+    }
+
+    /** No constructor runs, so a subclass's own fields start out null. */
+    public static <T extends World> T createStubWorld(Class<T> type, boolean remote) {
         if (!initialized) throw new IllegalStateException("Call MCBootstrap.init() first");
         final Unsafe unsafe = getUnsafe();
         try {
-            World world = (World) unsafe.allocateInstance(WorldServer.class);
+            final T world = type.cast(unsafe.allocateInstance(type));
             putBoolean(unsafe, world, World.class, "isRemote", remote);
             return world;
         } catch (InstantiationException e) {
