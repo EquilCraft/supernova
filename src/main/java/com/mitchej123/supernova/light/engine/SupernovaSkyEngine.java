@@ -860,8 +860,20 @@ public class SupernovaSkyEngine extends SupernovaRGBEngine {
                 if (currentRGB == 0) {
                     continue;
                 }
-                // WHITE is a sky source: immutable during decrease.
+                // WHITE is a sky source: never cleared, but it has to re-propagate or the cells this decrease just darkened stay dark.
                 if (currentRGB == WHITE) {
+                    if (increaseQueueLength >= increaseQueue.length) {
+                        if (increaseQueue.length >= MAX_QUEUE_SIZE) {
+                            this.queueOverflowed = true;
+                            continue;
+                        }
+                        increaseQueue = this.resizeIncreaseQueue();
+                    }
+                    increaseQueue[increaseQueueLength++] = encodeCoords(offX, offZ, offY, encodeOffset)
+                            | PackedColorLightQueue.encodeQueuePackedRGB(WHITE)
+                            | (((long) ALL_DIRECTIONS_BITSET) << RGB_DIR_SHIFT)
+                            | FLAG_RECHECK_LEVEL
+                            | sidedFlag(this.getBlockIdFast(sectionIndex, offX & 15, offY & 15, offZ & 15));
                     continue;
                 }
 

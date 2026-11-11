@@ -600,8 +600,20 @@ public class ScalarSkyEngine extends SupernovaEngine {
                 if (currentLevel == 0) {
                     continue;
                 }
-                // 15 is a sky source: immutable during decrease.
+                // 15 is a sky source: never cleared, but it has to re-propagate or the cells this decrease just darkened stay dark.
                 if (currentLevel == 15) {
+                    if (increaseQueueLength >= increaseQueue.length) {
+                        if (increaseQueue.length >= MAX_QUEUE_SIZE) {
+                            this.queueOverflowed = true;
+                            continue;
+                        }
+                        increaseQueue = this.resizeIncreaseQueue();
+                    }
+                    increaseQueue[increaseQueueLength++] = encodeCoords(offX, offZ, offY, encodeOffset)
+                            | this.encodeQueueLevel(15)
+                            | (((long) ALL_DIRECTIONS_BITSET) << DIRECTION_SHIFT)
+                            | FLAG_RECHECK_LEVEL
+                            | sidedFlag(this.getBlockIdFast(sectionIndex, offX & 15, offY & 15, offZ & 15));
                     continue;
                 }
 
