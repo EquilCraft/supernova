@@ -293,6 +293,8 @@ abstract class AbstractSupernovaDataManager
 
     @Override
     public void readFromBuffer(Chunk chunk, int subChunkMask, boolean forceUpdate, ByteBuffer buffer) {
+        // A partial update's light covers only its own sections and may predate its changes; the client lights them itself (MixinChunk_FillChunkClient).
+        if (!forceUpdate) return;
         final SupernovaChunk ext = (SupernovaChunk) chunk;
         readChunkFromBuffer(buffer, getNibblesR(ext), getNibblesG(ext), getNibblesB(ext), subChunkMask, forceUpdate);
     }
