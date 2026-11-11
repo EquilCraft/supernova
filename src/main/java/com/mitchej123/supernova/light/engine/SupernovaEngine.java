@@ -532,8 +532,9 @@ public abstract class SupernovaEngine {
                 return;
             }
             // Sections first: they create and remove the nibbles the block pass writes into.
-            if (changedSections != null) {
-                final boolean[] ret = this.handleEmptySectionChanges(chunk, changedSections, false);
+            final Boolean[] sectionChanges = this.reconcileEmptiness(chunkX, chunkZ, changedPositions, changedSections);
+            if (sectionChanges != null) {
+                final boolean[] ret = this.handleEmptySectionChanges(chunk, sectionChanges, false);
                 if (ret != null) {
                     this.setEmptinessMap(chunk, ret);
                 }
@@ -545,6 +546,43 @@ public abstract class SupernovaEngine {
         } finally {
             this.destroyCaches();
         }
+    }
+
+    /**
+     * Section changes for this task, with whatever the edited positions reveal added in. The caller only reports a section when its storage is allocated,
+     * but one whose storage outlived its blocks fills up again without that, and one can empty out without anyone saying so. A chunk that has no emptiness
+     * map yet (loaded with saved light, or received from the server) gets one built from its sections here, on its first edit.
+     */
+    private Boolean[] reconcileEmptiness(final int chunkX, final int chunkZ, final IntOpenHashSet changedPositions, final Boolean[] reported) {
+        if (changedPositions == null || changedPositions.isEmpty()) {
+            return reported;
+        }
+        final boolean[] known = this.getEmptinessMap(chunkX, chunkZ);
+        if (known == null) {
+            return reported != null ? reported : new Boolean[WorldUtil.getTotalSections()];
+        }
+
+        Boolean[] changes = reported;
+        final IntIterator it = changedPositions.iterator();
+        while (it.hasNext()) {
+            final int sectionY = (it.nextInt() >> 8) >> 4;
+            if (sectionY < this.minSection || sectionY > this.maxSection) {
+                continue;
+            }
+            final int index = sectionY - this.minSection;
+            if (changes != null && changes[index] != null) {
+                continue;
+            }
+            final ExtendedBlockStorage section = this.getChunkSection(chunkX, sectionY, chunkZ);
+            final boolean empty = section == null || ((ExtendedSection) section).supernova$hasNoBlocks();
+            if (known[index] != empty) {
+                if (changes == null) {
+                    changes = new Boolean[WorldUtil.getTotalSections()];
+                }
+                changes[index] = empty;
+            }
+        }
+        return changes;
     }
 
     protected void processBlockPositionChanges(final Chunk chunk, final int chunkX, final int chunkZ, final IntOpenHashSet changedPositions) {
