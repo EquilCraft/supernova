@@ -264,7 +264,11 @@ public abstract class MixinChunk implements SupernovaChunk {
 
         // Scalar baseline so chunk packets carry sane sky values before the RGB BFS runs.
         if (!this.worldObj.provider.hasNoSky) {
-            supernova$fillVanillaSkyColumn(topSegment);
+            for (int x = 0; x < 16; ++x) {
+                for (int z = 0; z < 16; ++z) {
+                    ChunkLightHelper.fillVanillaSkyColumn(this, this.storageArrays, x, z, topSegment);
+                }
+            }
         }
 
         this.isModified = true;
@@ -304,47 +308,13 @@ public abstract class MixinChunk implements SupernovaChunk {
                 }
             }
 
-            // Sections created during population (tall trees) otherwise ship zero sky.
+            // Until the chunk is lit, a section created during population (tall trees) would otherwise ship zero sky.
             if (!this.worldObj.provider.hasNoSky) {
-                supernova$fillVanillaSkyForColumn(x, z, this.getTopFilledSegment());
+                ChunkLightHelper.fillVanillaSkyColumn(this, this.storageArrays, x, z, this.getTopFilledSegment());
             }
         }
 
         this.isModified = true;
-    }
-
-    @Unique
-    private void supernova$fillVanillaSkyColumn(final int topSegment) {
-        for (int lx = 0; lx < 16; ++lx) {
-            for (int lz = 0; lz < 16; ++lz) {
-                supernova$fillVanillaSkyForColumn(lx, lz, topSegment);
-            }
-        }
-    }
-
-    /** Vanilla column walk: sky=15 top-down by opacity; below the first opaque block even transparent blocks attenuate by 1. */
-    @Unique
-    private void supernova$fillVanillaSkyForColumn(final int x, final int z, final int topSegment) {
-        int skyLevel = 15;
-        for (int y = topSegment + 15; y >= 0; --y) {
-            final ExtendedBlockStorage section = this.storageArrays[y >> 4];
-            if (section == null) {
-                if (skyLevel != 15) {
-                    skyLevel = Math.max(0, skyLevel - 1);
-                }
-                continue;
-            }
-            int opacity = section.getBlockByExtId(x, y & 15, z).getLightOpacity();
-            if (opacity == 0 && skyLevel != 15) {
-                opacity = 1;
-            }
-            skyLevel = Math.max(0, skyLevel - opacity);
-            final NibbleArray skyArr = section.getSkylightArray();
-            if (skyArr != null) {
-                skyArr.set(x, y & 15, z, skyLevel);
-            }
-            if (skyLevel <= 0) break;
-        }
     }
 
     /**

@@ -26,7 +26,7 @@ class ClientRenderSimTest {
     /** Forge's clumpingThreshold: past this many changes in one chunk in one tick the server resends its sections. */
     private static final int CLUMPING_THRESHOLD = 64;
 
-    private static Block lamp, orange, glass, water, slab;
+    private static Block lamp, orange, glass, water, slab, leaves;
 
     @BeforeAll
     static void registerBlocks() {
@@ -37,6 +37,7 @@ class ClientRenderSimTest {
         glass = p[12];
         water = p[13];
         slab = p[15];
+        leaves = p[21];
     }
 
     private static void terrain(final SimChunk chunk, final Random rng) {
@@ -75,6 +76,7 @@ class ClientRenderSimTest {
                 }
             }
             if (rng.nextInt(3) == 0) edits.add(new int[] { x + 1, ground + 2, z, 2 });
+            if (rng.nextInt(2) == 0) edits.add(new int[] { x - 1, top + 2, z, 3 });
         }
         return edits;
     }
@@ -111,7 +113,7 @@ class ClientRenderSimTest {
             final Long2IntOpenHashMap masks = new Long2IntOpenHashMap();
             edits.removeIf(e -> server.chunk(e[0] >> 4, e[2] >> 4) == null);
             for (final int[] e : edits) {
-                final Block block = e[3] == 0 ? Blocks.stone : e[3] == 1 ? glass : orange;
+                final Block block = e[3] == 0 ? Blocks.stone : e[3] == 1 ? leaves : e[3] == 3 ? glass : orange;
                 if (server.getBlock(e[0], e[1], e[2]) == block) continue;
                 server.writeBlock(e[0], e[1], e[2], block);
                 final long key = ((long) (e[0] >> 4) << 32) | ((e[2] >> 4) & 0xFFFFFFFFL);
@@ -129,7 +131,7 @@ class ClientRenderSimTest {
             for (final int[] e : edits) {
                 final long key = ((long) (e[0] >> 4) << 32) | ((e[2] >> 4) & 0xFFFFFFFFL);
                 if (perChunk.get(key) >= CLUMPING_THRESHOLD) continue;
-                client.setBlockOnClient(e[0], e[1], e[2], e[3] == 0 ? Blocks.stone : e[3] == 1 ? glass : orange);
+                client.setBlockOnClient(e[0], e[1], e[2], e[3] == 0 ? Blocks.stone : e[3] == 1 ? leaves : e[3] == 3 ? glass : orange);
             }
             server.flush();
         }
@@ -137,6 +139,7 @@ class ClientRenderSimTest {
         client.frame();
         assertNull(server.diff(0, 255), "seed " + seed + ": server light after population");
         assertNull(client.diff(0, 255), "seed " + seed + ": client light after population");
+        assertNull(server.vanillaMismatches(), "seed " + seed + ": server vanilla arrays after population");
         assertNull(client.vanillaMismatches(), "seed " + seed + ": client vanilla arrays after population");
         assertNull(client.staleMeshes(), "seed " + seed + ": client meshes after population");
     }

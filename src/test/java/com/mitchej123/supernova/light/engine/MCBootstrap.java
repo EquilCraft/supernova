@@ -44,6 +44,7 @@ public final class MCBootstrap {
         public static final int RND_TINTED_GLASS = 239;
         public static final int TINTED_GLASS = 240;
         public static final int DIM_RED_LAMP = 241;
+        public static final int SIM_LEAVES = 242;
         public static final int REMAP_LAMP = 300, REMAP_LAMP_TARGET = 555;
         public static final int REMAP_GLASS = 310, REMAP_GLASS_TARGET = 600;
         public static final int REMAP_SIDED = 320, REMAP_SIDED_TARGET = 610;

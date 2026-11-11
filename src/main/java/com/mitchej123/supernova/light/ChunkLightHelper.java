@@ -28,6 +28,37 @@ public final class ChunkLightHelper {
         return false;
     }
 
+    /**
+     * Vanilla's column walk for one column's sky, written straight into vanilla's arrays: 15 down to the first opaque block, then at least 1 less per block.
+     * It only stands in for a chunk Supernova has not lit yet. Once it has, its engine keeps these arrays in step with the nibbles, and only for the cells
+     * whose light actually changes; overwriting a column here would leave every other cell in it at a value that knows nothing of the light coming in from
+     * the side, and Angelica takes brightness from exactly these arrays.
+     */
+    public static void fillVanillaSkyColumn(final SupernovaChunk chunk, final ExtendedBlockStorage[] storageArrays, final int x, final int z,
+        final int topSegment) {
+        if (chunk.isSkyLightUsable()) return;
+        int skyLevel = 15;
+        for (int y = topSegment + 15; y >= 0; --y) {
+            final ExtendedBlockStorage section = storageArrays[y >> 4];
+            if (section == null) {
+                if (skyLevel != 15) {
+                    skyLevel = Math.max(0, skyLevel - 1);
+                }
+                continue;
+            }
+            int opacity = section.getBlockByExtId(x, y & 15, z).getLightOpacity();
+            if (opacity == 0 && skyLevel != 15) {
+                opacity = 1;
+            }
+            skyLevel = Math.max(0, skyLevel - opacity);
+            final NibbleArray skyArr = section.getSkylightArray();
+            if (skyArr != null) {
+                skyArr.set(x, y & 15, z, skyLevel);
+            }
+            if (skyLevel <= 0) break;
+        }
+    }
+
     /** True when at least one section carries a nibble; a chunk whose light was loaded always has one. */
     public static boolean hasAnyLight(final SWMRNibbleArray[] nibbles) {
         if (nibbles == null) return false;

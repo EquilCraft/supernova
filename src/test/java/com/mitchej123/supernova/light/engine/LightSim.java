@@ -565,6 +565,8 @@ public final class LightSim {
         }
         if (section.getBlockByExtId(x & 15, y & 15, z & 15) == block) return false;
         section.func_150818_a(x & 15, y & 15, z & 15, block);
+        // MixinChunk.relightBlock, which runs whenever a change moves the height map; doing it on every change only makes the check stricter.
+        ChunkLightHelper.fillVanillaSkyColumn(chunk, sections, x & 15, z & 15, chunk.getTopFilledSegment());
 
         IntOpenHashSet positions = this.pendingPositions.get(key);
         if (positions == null) this.pendingPositions.put(key, positions = new IntOpenHashSet());

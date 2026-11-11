@@ -92,10 +92,12 @@ class LightSimRandomTest {
         final Block bottomSlab = MCBootstrap.registerTestBlock(TestIds.RND_BOTTOM_SLAB, "rnd_bottom_slab", BottomSlab.class, 255, false, 0);
         final Block topSlab = MCBootstrap.registerTestBlock(TestIds.RND_TOP_SLAB, "rnd_top_slab", TopSlab.class, 255, false, 0);
         final Block tinted = MCBootstrap.registerTestBlock(TestIds.RND_TINTED_GLASS, "rnd_tinted_glass", TintedGlass.class, 0, false, 0);
+        // Leaves: they stop the sky beam yet let light through at a cost of one, which vanilla's own column walk gets wrong.
+        final Block leaves = MCBootstrap.registerTestBlock(TestIds.SIM_LEAVES, "sim_leaves", Block.class, 1, false, 0);
         FaceOcclusion.registerDefaults();
         palette = new Block[] {
             Blocks.air, Blocks.air, Blocks.air, Blocks.air, Blocks.stone, Blocks.stone, Blocks.stone, Blocks.stone,
-            lamp, dim, orange, blue, glass, water, glowstone, bottomSlab, topSlab, bottomSlab, topSlab, tinted, tinted };
+            lamp, dim, orange, blue, glass, water, glowstone, bottomSlab, topSlab, bottomSlab, topSlab, tinted, tinted, leaves, leaves };
     }
 
     private static final int RADIUS = 1;
