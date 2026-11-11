@@ -640,8 +640,10 @@ public abstract class SupernovaEngine {
             final IntIterator it = sections.iterator();
             while (it.hasNext()) {
                 this.checkChunkEdge(chunkX, it.nextInt(), chunkZ);
-                this.performLightDecrease();  // drain BFS per-section so later sections see earlier corrections
             }
+            // One pass after every section has been judged against the light as it arrived. Draining per section lets light that lost its source on
+            // one side of the seam flow back across it first; the next section then finds the two sides in agreement and the stale light stays.
+            this.performLightDecrease();
             this.updateVisible();
         } finally {
             this.destroyCaches();
