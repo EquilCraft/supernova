@@ -11,6 +11,7 @@ import com.mitchej123.supernova.light.engine.SupernovaSkyEngine;
 import com.gtnewhorizon.gtnhlib.util.ServerThreadUtil;
 import com.mitchej123.supernova.util.CoordinateUtils;
 import com.mitchej123.supernova.util.SnapshotChunkMap;
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.network.play.server.S21PacketChunkData;
 import net.minecraft.world.World;
@@ -60,6 +61,9 @@ public final class WorldLightManager {
     private static final long UNLOAD_WAIT_NS = 10_000_000L;
     private static final long SERVER_BATCH_BUDGET_NS = 10_000_000L;
     private static final long CLIENT_TICK_BUDGET_NS = 2_000_000L;
+    private static final long MAX_SEND_DEFER_NS = 1_000_000_000L;
+    /** When a chunk that was otherwise ready to send was first held back for pending light work; server thread only. */
+    private final Long2LongOpenHashMap sendDeferredSince = new Long2LongOpenHashMap();
     private boolean clientStartsWithSky = true;
 
     public WorldLightManager(final World world, final boolean hasSkyLight, final boolean hasBlockLight) {
@@ -123,15 +127,40 @@ public final class WorldLightManager {
     }
 
     public void unregisterChunk(final int cx, final int cz) {
+        this.sendDeferredSince.remove(CoordinateUtils.getChunkKey(cx, cz));
         this.loadedChunkMap.remove(CoordinateUtils.getChunkKey(cx, cz));
         this.dynamicEmission.unregisterChunk(cx, cz);
     }
 
     /** Seam light is final only once no loaded neighbor is mid-relight, and 1.7.10 cannot correct a chunk once sent. */
     public boolean isReadyToSend(final int cx, final int cz) {
+        return isReadyToSend(cx, cz, System.nanoTime());
+    }
+
+    boolean isReadyToSend(final int cx, final int cz, final long now) {
         if (!isChunkLightReady(cx, cz)) return false;
-        return isNeighborSettled(cx - 1, cz) && isNeighborSettled(cx + 1, cz)
-            && isNeighborSettled(cx, cz - 1) && isNeighborSettled(cx, cz + 1);
+        if (!(isNeighborSettled(cx - 1, cz) && isNeighborSettled(cx + 1, cz)
+            && isNeighborSettled(cx, cz - 1) && isNeighborSettled(cx, cz + 1))) return false;
+        return !holdBackForPendingWork(cx, cz, now);
+    }
+
+    /**
+     * A block changed before the chunk is sent never reaches the client as a block change, so the light for it has to be in the packet: the client has
+     * nothing to light it from later. Bounded, because an area that never stops changing would otherwise never be sent.
+     */
+    private boolean holdBackForPendingWork(final int cx, final int cz, final long now) {
+        final long key = CoordinateUtils.getChunkKey(cx, cz);
+        if (pendingWorkFuture(cx, cz) == null) {
+            this.sendDeferredSince.remove(key);
+            return false;
+        }
+        if (!this.sendDeferredSince.containsKey(key)) {
+            this.sendDeferredSince.put(key, now);
+            return true;
+        }
+        if (now - this.sendDeferredSince.get(key) < MAX_SEND_DEFER_NS) return true;
+        this.sendDeferredSince.remove(key);
+        return false;
     }
 
     private boolean isChunkLightReady(final int cx, final int cz) {
