@@ -103,9 +103,20 @@ public abstract class MixinChunk implements SupernovaChunk {
                 // Registered in the SnapshotChunkMap the light workers read (both client and server).
                 iface.registerChunk((Chunk) (Object) this);
 
-                if (hasBlockData) {
-                    ChunkLightHelper.importVanillaSky(this.supernova$skyNibbles, this.supernova$skyNibblesG, this.supernova$skyNibblesB, this.storageArrays, true);
+                // Each lane saves on its own, so one can reach disk without the other. Light that is only half there is not saved light.
+                final boolean savedLight = hasBlockData && !(SupernovaCore.CHUNKAPI_PRESENT && !this.worldObj.provider.hasNoSky
+                    && !ChunkLightHelper.hasAnyLight(this.supernova$skyNibbles));
+
+                if (savedLight) {
+                    if (!SupernovaCore.CHUNKAPI_PRESENT) {
+                        // Vanilla's arrays are the only sky light that was persisted. With our own data loaded a null nibble means "inherits from above",
+                        // and filling it from the vanilla bytes would pin whatever that section last held.
+                        ChunkLightHelper.importVanillaSky(this.supernova$skyNibbles, this.supernova$skyNibblesG, this.supernova$skyNibblesB, this.storageArrays, true);
+                    }
                     this.setLightReady(true);
+                    // Saved light is only as good as the neighbours were when it was written: light cannot enter a chunk that is not loaded, and a
+                    // neighbour generated since never saw this one.
+                    if (!this.worldObj.isRemote) iface.queueEdgeChecks(this.xPosition, this.zPosition);
                 } else if (!this.worldObj.isRemote) {
                     // Game logic reads sky before the BFS backlog clears.
                     ChunkLightHelper.importVanillaSky(this.supernova$skyNibbles, this.supernova$skyNibblesG, this.supernova$skyNibblesB, this.storageArrays, false);

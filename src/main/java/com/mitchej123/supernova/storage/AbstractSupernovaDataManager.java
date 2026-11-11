@@ -24,8 +24,15 @@ import java.util.Arrays;
 abstract class AbstractSupernovaDataManager
     implements DataManager.ChunkDataManager, DataManager.PacketDataManager, DataManager.CubicPacketDataManager {
 
-    /** Bumped whenever the on-disk layout changes; a chunk only loads its light when its stored marker matches. */
-    static final int LIGHT_VERSION = 2;
+    /** The on-disk layout as reported to ChunkAPI, which raises its startup query when this changes. */
+    static final int FORMAT_VERSION = 2;
+
+    /**
+     * Stamped on every chunk whose light is saved; a chunk only loads its light when its stamp matches. Bumped with the layout, and also when light that
+     * is already on disk can no longer be trusted: saved light is never recomputed, so whatever an earlier build got wrong would stay wrong for good.
+     * 3: sky light under blocks placed after a chunk's first lighting was left at zero instead of being re-lit from the sides.
+     */
+    static final int LIGHT_VERSION = 3;
 
     static final String NBT_VERSION = "v";
     static final String NBT_SCALAR = "sc";
@@ -82,7 +89,7 @@ abstract class AbstractSupernovaDataManager
 
     @Override
     public String version() {
-        return Integer.toString(LIGHT_VERSION);
+        return Integer.toString(FORMAT_VERSION);
     }
 
     @Override
@@ -99,7 +106,7 @@ abstract class AbstractSupernovaDataManager
     @Override
     public String versionChangeMessage(String priorVersion) {
         if (version().equals(priorVersion)) return null;
-        return "Supernova light storage changed from format " + priorVersion + " to " + LIGHT_VERSION
+        return "Supernova light storage changed from format " + priorVersion + " to " + FORMAT_VERSION
             + ". Existing light is discarded and recalculated on load; no blocks are affected.";
     }
 

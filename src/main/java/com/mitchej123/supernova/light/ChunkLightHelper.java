@@ -28,6 +28,15 @@ public final class ChunkLightHelper {
         return false;
     }
 
+    /** True when at least one section carries a nibble; a chunk whose light was loaded always has one. */
+    public static boolean hasAnyLight(final SWMRNibbleArray[] nibbles) {
+        if (nibbles == null) return false;
+        for (final SWMRNibbleArray nib : nibbles) {
+            if (!nibbleAbsent(nib)) return true;
+        }
+        return false;
+    }
+
     public static void importVanillaSky(SWMRNibbleArray[] skyR, SWMRNibbleArray[] skyG, SWMRNibbleArray[] skyB,
         ExtendedBlockStorage[] storageArrays, boolean onlyWhereNull) {
         final int minLight = WorldUtil.getMinLightSection();
